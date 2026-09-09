@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets
+.env
+.env.*
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Research data
+data/*
+*.xlsx
+*.xls
+*.csv
+
+# Temporary / test scripts
+reset_p101_pilot.py
+reset_p101_pilot.py.py
+setup_pilot_participants.py
+test_pilot_database.py
+test_profile_engine.py
+
+# Local agent/editor files
+.agents/
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
