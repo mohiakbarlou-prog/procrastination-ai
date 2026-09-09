@@ -1,4 +1,6 @@
 import json
+from io import BytesIO
+from datetime import date
 from pathlib import Path
 
 import joblib
@@ -9,7 +11,12 @@ from database import (
     initialize_database,
     get_connection,
     get_study_participant,
+    register_study_participant,
     get_study_day,
+    get_study_date,
+    jalali_from_gregorian,
+    to_persian_digits,
+    jalali_to_gregorian,
     has_assessment,
     get_assessment,
     get_assessment_responses,
@@ -51,7 +58,7 @@ st.markdown(
     .stApp {
         direction: rtl;
         text-align: right;
-        background: #f5f7fb;
+        background: #f2f8f4;
     }
 
     html, body, [class*="css"], .stMarkdown, .stTextInput,
@@ -70,7 +77,7 @@ st.markdown(
 
     /* عنوان اصلی */
     .hero {
-        background: linear-gradient(135deg, #ffffff 0%, #eef3ff 100%);
+        background: linear-gradient(135deg, #ffffff 0%, #edf8f1 100%);
         border-radius: 22px;
         padding: 30px 32px;
         margin-bottom: 24px;
@@ -109,7 +116,7 @@ st.markdown(
         line-height: 1.9;
     }
 
-    /* کارت مداخله */
+    /* کارت برنامه */
     .intervention {
         background: #ffffff;
         border: 1px solid #dfe5ef;
@@ -130,7 +137,7 @@ st.markdown(
     .action {
         padding: 10px 12px;
         margin: 7px 0;
-        background: #f5f7fb;
+        background: #f2f8f4;
         border-radius: 10px;
         line-height: 1.9;
     }
@@ -139,9 +146,37 @@ st.markdown(
         display: inline-block;
         padding: 6px 12px;
         border-radius: 999px;
-        background: #eef2f8;
+        background: #eaf6ee;
         margin: 4px;
         font-size: 0.85rem;
+    }
+
+    .study-meta {
+        direction: rtl !important;
+        text-align: right !important;
+        color: #5d6c63;
+        font-size: 0.94rem;
+        font-weight: 700;
+        margin: 8px 0 18px 0;
+    }
+
+    .researcher-title {
+        background: linear-gradient(135deg, #ffffff 0%, #e9f7ee 100%);
+        border: 1px solid #d7eadf;
+        border-radius: 20px;
+        padding: 24px;
+        margin-bottom: 20px;
+        direction: rtl;
+        text-align: right;
+    }
+
+    .researcher-note {
+        color: #5f7066;
+        line-height: 2;
+    }
+
+    [data-testid="stForm"], [data-testid="stTabs"], .stDataFrame {
+        direction: rtl !important;
     }
 
     /* =========================
@@ -419,16 +454,17 @@ def profile_label(profile):
 
 
 def save_student(student_data):
-    """Persist the seven demographic/educational fields in the existing students table."""
+    """Persist the seven demographic/educational fields plus Jalali registration date."""
     conn = get_connection()
     try:
+        registered = jalali_from_gregorian(date.today())
         conn.execute(
             """
             INSERT INTO students (
                 student_code, age, gender, degree, semester,
-                use_level, university, major
+                use_level, university, major, registered_at_jalali
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(student_code)
             DO UPDATE SET
                 age = excluded.age,
@@ -437,7 +473,11 @@ def save_student(student_data):
                 semester = excluded.semester,
                 use_level = excluded.use_level,
                 university = excluded.university,
-                major = excluded.major
+                major = excluded.major,
+                registered_at_jalali = COALESCE(
+                    students.registered_at_jalali,
+                    excluded.registered_at_jalali
+                )
             """,
             (
                 student_data["student_code"],
@@ -448,6 +488,7 @@ def save_student(student_data):
                 student_data["daily_use"],
                 student_data["university"],
                 student_data["major"],
+                registered,
             ),
         )
         conn.commit()
@@ -462,7 +503,7 @@ def load_student(student_code):
             """
             SELECT
                 student_code, age, gender, degree, semester,
-                use_level, university, major
+                use_level, university, major, registered_at_jalali
             FROM students
             WHERE student_code = ?
             """,
@@ -483,6 +524,7 @@ def load_student(student_code):
         "daily_use": row[5],
         "university": row[6],
         "major": row[7],
+        "registered_at_jalali": row[8],
     }
 
 
@@ -504,8 +546,8 @@ def row_to_intervention(row):
 
 
 def render_intervention(intervention, index=1):
-    name = intervention.get("name", "مداخله پیشنهادی")
-    description = intervention.get("description", "")
+    name = str(intervention.get("name", "برنامه پیشنهادی")).replace("مداخله", "برنامه")
+    description = str(intervention.get("description", "")).replace("مداخله", "برنامه")
     profile = profile_label(intervention.get("profile"))
     score = intervention.get("profile_score")
     intensity = LEVEL_NAMES.get(
@@ -513,10 +555,27 @@ def render_intervention(intervention, index=1):
         intervention.get("intensity", "medium"),
     )
 
-    action_html = "".join(
-        f'<div class="action">✓ {action}</div>'
-        for action in (intervention.get("actions") or [])
+    st.markdown(
+        f"""
+        <div class="intervention">
+            <div class="intervention-title">
+                {to_persian_digits(index)}. {name}
+            </div>
+            <div class="small">
+                مرتبط با: <b>{profile}</b>
+                {" | امتیاز الگو: " + to_persian_digits(round(float(score), 2)) if score is not None else ""}
+                {" | شدت: " + intensity if intervention.get("intensity") else ""}
+            </div>
+            <p>{description}</p>
+        """,
+        unsafe_allow_html=True,
     )
+
+    for action in intervention.get("actions") or []:
+        st.markdown(
+            f'<div class="action">✓ {action}</div>',
+            unsafe_allow_html=True,
+        )
 
     presentation = intervention.get("presentation") or {}
     notes = [
@@ -524,42 +583,24 @@ def render_intervention(intervention, index=1):
         presentation.get("time_note"),
     ]
     notes = [x for x in notes if x]
-    notes_html = (
-        f'<div class="small">نحوه ارائه: {" ".join(notes)}</div>'
-        if notes
-        else ""
-    )
 
-    score_html = (
-        f' | امتیاز الگو: {round(float(score), 2)}'
-        if score is not None
-        else ""
-    )
+    if notes:
+        st.markdown(
+            f'<div class="small">نحوه ارائه: {" ".join(notes)}</div>',
+            unsafe_allow_html=True,
+        )
 
-    st.markdown(
-        f"""
-        <div class="intervention">
-            <div class="intervention-title">{index}. {name}</div>
-            <div class="small">
-                مرتبط با: <b>{profile}</b>{score_html} | شدت: {intensity}
-            </div>
-            <p>{description}</p>
-            {action_html}
-            {notes_html}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_student_context(student):
     st.markdown(
         f"""
         <div class="card">
-            <span class="badge">سن: {student["age"]}</span>
+            <span class="badge">سن: {to_persian_digits(student["age"])}</span>
             <span class="badge">جنسیت: {student["gender"]}</span>
             <span class="badge">مقطع: {student["degree"]}</span>
-            <span class="badge">ترم: {student["semester"]}</span>
+            <span class="badge">ترم: {to_persian_digits(student["semester"])}</span>
             <span class="badge">استفاده روزانه: {student["daily_use"]}</span>
             <span class="badge">دانشگاه: {student["university"]}</span>
             <span class="badge">رشته: {student["major"]}</span>
@@ -587,7 +628,7 @@ def questionnaire_form(form_key, title):
     with st.form(form_key):
         for i, question in enumerate(QUESTIONS, start=1):
             answers[f"q{i}"] = st.radio(
-                f"{i}. {question}",
+                f"{to_persian_digits(i)}. {question}",
                 OPTIONS,
                 index=2,
                 horizontal=True,
@@ -611,20 +652,11 @@ def questionnaire_form(form_key, title):
     return numeric
 
 
-def to_profile_answers(answers):
-    """Normalize questionnaire keys for the behavioral profile engine.
-
-    The UI/database use q1..q22, while profile.py expects Q1..Q22
-    and reverse-scored items such as Q20R are resolved internally.
-    """
-    return {f"Q{i}": answers[f"q{i}"] for i in range(1, 23)}
-
-
 def calculate_intervention_result(student, answers):
     total_score = calculate_total_score(answers)
     overall_level = classify_overall_level(total_score)
 
-    profile_result = create_profile(to_profile_answers(answers))
+    profile_result = create_profile(answers)
 
     ml_result = predict_level(student)
     estimated_level = (
@@ -709,7 +741,7 @@ def save_day1_interventions(student, result):
 
 def render_result_summary(result):
     c1, c2, c3 = st.columns(3)
-    c1.metric("نمره کل", f'{result["total_score"]:.1f} از 110')
+    c1.metric("نمره کل", f'{to_persian_digits(f"{result["total_score"]:.1f}")} از {to_persian_digits(110)}')
     c2.metric("سطح پرسشنامه", LEVEL_NAMES.get(result["overall_level"], result["overall_level"]))
     c3.metric("برآورد مدل", LEVEL_NAMES.get(result["estimated_level"], result["estimated_level"]))
 
@@ -719,11 +751,333 @@ def render_result_summary(result):
         st.caption(
             "احتمال‌های مدل: "
             + " | ".join(
-                f"{LEVEL_NAMES.get(k, k)}: {v:.1%}"
+                f"{LEVEL_NAMES.get(k, k)}: {to_persian_digits(f'{v:.1%}')}"
                 for k, v in p.items()
             )
         )
 
+
+def get_daily_checkin_question(profile, day_number):
+    """Return one concise daily process-monitoring question.
+
+    The wording changes by day and dominant behavioral profile. Responses are
+    process data only and are not added to the 22-item procrastination score.
+    """
+    question_bank = {
+        "task_initiation": [
+            "امروز شروع فعالیت برایت تا چه اندازه دشوار بود؟",
+            "امروز تا چه اندازه توانستی فعالیت را بدون تأخیر طولانی شروع کنی؟",
+            "امروز تا چه اندازه تصمیم برای شروع به شروع واقعی کار تبدیل شد؟",
+            "امروز تا چه اندازه شروع فعالیت برایت سریع‌تر از معمول انجام شد؟",
+            "امروز تا چه اندازه توانستی مانع شروع کار را پشت سر بگذاری؟",
+            "امروز تا چه اندازه از راهبرد شروع کوتاه برای آغاز کار استفاده کردی؟",
+        ],
+        "educational_content": [
+            "امروز تا چه اندازه محتوای آموزشی برنامه‌ریزی‌شده را مطالعه کردی؟",
+            "امروز تا چه اندازه مطالعه محتوای آموزشی را به‌موقع شروع کردی؟",
+            "امروز تا چه اندازه توانستی مطالعه محتوای آموزشی را ادامه بدهی؟",
+            "امروز تا چه اندازه مطالعه محتوا را از زمان برنامه‌ریزی‌شده عقب انداختی؟",
+            "امروز تا چه اندازه نسبت به روز قبل در مطالعه محتوا پیشرفت داشتی؟",
+            "امروز تا چه اندازه توانستی محتوای آموزشی را به بخش‌های کوچک‌تر تقسیم کنی؟",
+        ],
+        "deadline_time": [
+            "امروز تا چه اندازه طبق زمان‌بندی تعیین‌شده پیش رفتی؟",
+            "امروز تا چه اندازه فعالیت را قبل از نزدیک‌شدن به مهلت انجام دادی؟",
+            "امروز تا چه اندازه توانستی زمان فعالیت را مدیریت کنی؟",
+            "امروز تا چه اندازه کار را به دقایق پایانی موکول کردی؟",
+            "امروز تا چه اندازه نسبت به روز قبل کنترل بیشتری بر زمان داشتی؟",
+            "امروز تا چه اندازه توانستی برای فعالیت زمان مشخص و قابل اجرا تعیین کنی؟",
+        ],
+        "participation": [
+            "امروز تا چه اندازه در فعالیت یا مشارکت آموزشی برنامه‌ریزی‌شده حضور داشتی؟",
+            "امروز تا چه اندازه مشارکت در فعالیت آنلاین برایت آسان بود؟",
+            "امروز تا چه اندازه توانستی به‌موقع در فعالیت آموزشی مشارکت کنی؟",
+            "امروز تا چه اندازه مشارکت آموزشی را به زمان دیگری موکول کردی؟",
+            "امروز تا چه اندازه نسبت به روز قبل در مشارکت پیشرفت داشتی؟",
+            "امروز تا چه اندازه برای مشارکت آنلاین آمادگی داشتی؟",
+        ],
+        "task_difficulty": [
+            "امروز تا چه اندازه دشواری تکلیف شروع یا ادامه آن را سخت کرد؟",
+            "امروز تا چه اندازه توانستی با بخش دشوار تکلیف ادامه بدهی؟",
+            "امروز تا چه اندازه دشواری تکلیف روی پیشروی تو اثر گذاشت؟",
+            "امروز تا چه اندازه به دلیل دشواری، انجام تکلیف را عقب انداختی؟",
+            "امروز تا چه اندازه نسبت به روز قبل در مواجهه با دشواری بهتر عمل کردی؟",
+            "امروز تا چه اندازه توانستی بخش دشوار تکلیف را به گام‌های کوچک‌تر تبدیل کنی؟",
+        ],
+        "digital_distraction": [
+            "امروز تا چه اندازه حواس‌پرتی دیجیتال هنگام فعالیت برایت مشکل ایجاد کرد؟",
+            "امروز تا چه اندازه توانستی عوامل حواس‌پرت‌کن دیجیتال را کنترل کنی؟",
+            "امروز تا چه اندازه هنگام فعالیت سراغ شبکه‌های اجتماعی یا وبگردی رفتی؟",
+            "امروز تا چه اندازه توانستی یک بازه بدون حواس‌پرتی دیجیتال ایجاد کنی؟",
+            "امروز تا چه اندازه حواس‌پرتی دیجیتال نسبت به روز قبل کمتر بود؟",
+            "امروز تا چه اندازه از راهبرد تمرکز دیجیتال استفاده کردی؟",
+        ],
+        "help_seeking": [
+            "امروز تا چه اندازه برای ابهام یا مشکل درسی به‌موقع کمک خواستی؟",
+            "امروز تا چه اندازه درخواست کمک از استاد یا منبع آموزشی برایت آسان بود؟",
+            "امروز تا چه اندازه توانستی بدون تعلل برای مشکل درسی اقدام کنی؟",
+            "امروز تا چه اندازه کمک‌خواهی را به زمان دیگری موکول کردی؟",
+            "امروز تا چه اندازه نسبت به روز قبل در کمک‌خواهی به‌موقع‌تر بودی؟",
+            "امروز تا چه اندازه از راهبرد کمک‌خواهی استفاده کردی؟",
+        ],
+        "group_activity": [
+            "امروز تا چه اندازه سهم خودت از فعالیت گروهی را طبق برنامه انجام دادی؟",
+            "امروز تا چه اندازه هماهنگی با همگروهی‌ها برایت آسان بود؟",
+            "امروز تا چه اندازه توانستی سهم خود را به‌موقع پیش ببری؟",
+            "امروز تا چه اندازه مسئولیت گروهی را عقب انداختی؟",
+            "امروز تا چه اندازه نسبت به روز قبل در فعالیت گروهی پیشرفت داشتی؟",
+            "امروز تا چه اندازه برای تحویل به‌موقع سهم گروهی برنامه داشتی؟",
+        ],
+        "stress_guilt": [
+            "امروز تا چه اندازه هنگام عقب‌افتادن از برنامه احساس فشار کردی؟",
+            "امروز تا چه اندازه توانستی فشار ذهنی هنگام انجام فعالیت را مدیریت کنی؟",
+            "امروز تا چه اندازه احساس گناه روی انجام فعالیت اثر گذاشت؟",
+            "امروز تا چه اندازه فشار ذهنی باعث تعویق فعالیت شد؟",
+            "امروز تا چه اندازه احساس فشار نسبت به روز قبل کمتر بود؟",
+            "امروز تا چه اندازه از یک راهبرد آرام‌سازی یا شروع مرحله‌ای استفاده کردی؟",
+        ],
+        "general_procrastination": [
+            "امروز تا چه اندازه توانستی کارهای تحصیلی را به‌موقع انجام دهی؟",
+            "امروز تا چه اندازه شروع کارهای تحصیلی برایت آسان بود؟",
+            "امروز تا چه اندازه توانستی در برابر تعویق مقاومت کنی؟",
+            "امروز تا چه اندازه بخشی از کارها را بیشتر از برنامه عقب انداختی؟",
+            "امروز تا چه اندازه نسبت به روز قبل در به‌موقع انجام‌دادن کارها پیشرفت داشتی؟",
+            "امروز تا چه اندازه از راهبرد تعیین یک گام کوچک برای پیشروی استفاده کردی؟",
+        ],
+    }
+
+    questions = question_bank.get(profile) or question_bank["general_procrastination"]
+    index = max(0, min(int(day_number) - 1, len(questions) - 1))
+    return questions[index]
+
+
+# ============================================================
+# Researcher-only page
+# ============================================================
+
+GROUP_LABELS = {
+    "intervention": "گروه پشتیبانی",
+    "control": "گروه روال معمول",
+}
+
+
+def _safe_admin_key():
+    try:
+        return str(st.secrets.get("ADMIN_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
+def _jalali_created(value):
+    if not value:
+        return ""
+    try:
+        return jalali_from_gregorian(date.fromisoformat(str(value)[:10]))
+    except Exception:
+        return ""
+
+
+def _researcher_dataframes():
+    conn = get_connection()
+    try:
+        participants = pd.read_sql_query("SELECT student_code, group_type, start_date, end_date, status, consent, created_at FROM study_participants ORDER BY id", conn)
+        students = pd.read_sql_query("SELECT * FROM students ORDER BY id", conn)
+        assessments = pd.read_sql_query("SELECT id, student_code, assessment_type, total_score, level, created_at FROM assessments ORDER BY id", conn)
+        responses = pd.read_sql_query("SELECT * FROM assessment_responses ORDER BY id", conn)
+        programs = pd.read_sql_query("SELECT id, student_code, day_number, intervention_order, profile, profile_score, profile_level, overall_level, estimated_level, intervention_name, intervention_description, intensity, shown_at FROM study_interventions ORDER BY id", conn)
+        daily = pd.read_sql_query("SELECT * FROM daily_logs ORDER BY id", conn)
+        coach = pd.read_sql_query("SELECT * FROM coach_logs ORDER BY id", conn)
+    finally:
+        conn.close()
+
+    if not participants.empty:
+        participants["گروه"] = participants["group_type"].map(GROUP_LABELS).fillna("")
+        participants["تاریخ شروع"] = participants["start_date"].fillna("").map(to_persian_digits)
+        participants["تاریخ پایان"] = participants["end_date"].fillna("").map(to_persian_digits)
+        participants["رضایت"] = participants["consent"].map({1: "ثبت شده", 0: "ثبت نشده"}).fillna("")
+        participants["تاریخ ثبت شمسی"] = participants["created_at"].map(_jalali_created)
+        participants = participants.drop(columns=["group_type"], errors="ignore")
+
+    if not students.empty:
+        students = students.rename(columns={
+            "student_code": "کد پژوهشی", "age": "سن", "gender": "جنسیت",
+            "degree": "مقطع", "semester": "ترم", "use_level": "استفاده روزانه",
+            "university": "دانشگاه", "major": "رشته",
+            "registered_at_jalali": "تاریخ ثبت اطلاعات",
+        })
+        if "تاریخ ثبت اطلاعات" in students.columns:
+            students["تاریخ ثبت اطلاعات"] = students["تاریخ ثبت اطلاعات"].fillna("").map(to_persian_digits)
+
+    if not assessments.empty:
+        assessments["نوع آزمون"] = assessments["assessment_type"].map({"pretest": "پیش‌آزمون", "posttest": "پس‌آزمون"}).fillna(assessments["assessment_type"])
+        assessments["تاریخ شمسی"] = assessments["created_at"].map(_jalali_created)
+
+    if not responses.empty and not assessments.empty and "assessment_id" in responses.columns:
+        response_dates = assessments[["id", "تاریخ شمسی"]].rename(columns={"id": "assessment_id"})
+        responses = responses.merge(response_dates, on="assessment_id", how="left")
+
+    if not coach.empty and "created_at" in coach.columns:
+        coach["تاریخ شمسی"] = coach["created_at"].map(_jalali_created)
+
+    if not daily.empty:
+        start_map = participants.set_index("student_code")["start_date"].to_dict() if not participants.empty else {}
+        def row_date(row):
+            start = start_map.get(row["student_code"])
+            try:
+                g = jalali_to_gregorian(*[int(x) for x in str(start).split("/")[:3]])
+                return jalali_from_gregorian(g + pd.Timedelta(days=int(row["day_number"]) - 1))
+            except Exception:
+                return ""
+        daily["تاریخ شمسی"] = daily.apply(row_date, axis=1)
+        daily["وضعیت"] = daily["action_status"].map({
+            "not_started": "هنوز شروع نکردم",
+            "partial": "بخشی از آن را انجام دادم",
+            "completed": "کامل انجام دادم",
+        }).fillna(daily["action_status"])
+
+    if not programs.empty:
+        programs["تاریخ شمسی"] = programs["shown_at"].map(_jalali_created)
+
+    for frame in (students, assessments, responses, programs, daily, coach):
+        for col in frame.columns:
+            if frame[col].dtype == "object":
+                frame[col] = frame[col].map(lambda x: str(x).replace("مداخله", "برنامه") if pd.notna(x) else x)
+
+    return {
+        "شرکت‌کنندگان": participants,
+        "اطلاعات دانشجو": students,
+        "آزمون‌ها": assessments,
+        "پاسخ‌های ۲۲ سؤال": responses,
+        "برنامه‌های ثبت‌شده": programs,
+        "پایش روزانه": daily,
+        "مربی هوشمند": coach,
+    }
+
+
+def _make_excel(dataframes):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet, df in dataframes.items():
+            df.to_excel(writer, sheet_name=sheet[:31], index=False)
+    return output.getvalue()
+
+
+def render_researcher_page():
+    st.markdown(
+        """
+        <div class="researcher-title">
+            <h1>صفحه پژوهشگر</h1>
+            <div class="researcher-note">این صفحه فقط با رمز پژوهشگر قابل دسترسی است و در مسیر معمول شرکت‌کننده نمایش داده نمی‌شود.</div>
+        </div>
+        """, unsafe_allow_html=True
+    )
+
+    if not st.session_state.get("researcher_authenticated", False):
+        with st.form("researcher_login"):
+            password = st.text_input("رمز پژوهشگر", type="password")
+            submitted = st.form_submit_button("ثبت و بررسی", type="primary", use_container_width=True)
+        if submitted:
+            saved = _safe_admin_key()
+            if not saved:
+                st.error("ADMIN_KEY در Streamlit Secrets ثبت نشده است.")
+            elif password == saved:
+                st.session_state.researcher_authenticated = True
+                st.rerun()
+            else:
+                st.error("رمز پژوهشگر نادرست است.")
+        return
+
+    st.success("دسترسی پژوهشگر تأیید شد.")
+    col_a, col_b = st.columns([1, 4])
+    with col_a:
+        if st.button("خروج پژوهشگر", use_container_width=True):
+            st.session_state.researcher_authenticated = False
+            st.rerun()
+    with col_b:
+        st.caption("آخرین داده‌های ثبت‌شده از سامانه")
+
+    st.subheader("ثبت شرکت‌کننده")
+    with st.form("researcher_register"):
+        code = st.text_input("کد پژوهشی", placeholder="مثلاً P101").strip().upper()
+        group = st.selectbox("گروه", ["intervention", "control"], format_func=lambda x: GROUP_LABELS[x])
+        register = st.form_submit_button("ثبت و بررسی", type="primary", use_container_width=True)
+    if register:
+        if not code:
+            st.error("کد پژوهشی را وارد کنید.")
+        else:
+            try:
+                register_study_participant(student_code=code, group_type=group, consent=True, status="active")
+                p = get_study_participant(code)
+                st.success(f"کد {code} در {GROUP_LABELS[group]} ثبت شد.")
+                if p:
+                    st.info(f"تاریخ شروع: {to_persian_digits(p.get('start_date', ''))} | وضعیت: {p.get('status', '')}")
+            except Exception as exc:
+                st.error(f"ثبت شرکت‌کننده انجام نشد: {exc}")
+
+    dataframes = _researcher_dataframes()
+    participants = dataframes["شرکت‌کنندگان"]
+    assessments = dataframes["آزمون‌ها"]
+    daily = dataframes["پایش روزانه"]
+
+    # Concise participant-level summary for the researcher.
+    summary = participants[[c for c in ["student_code", "گروه", "تاریخ شروع", "تاریخ پایان", "status"] if c in participants.columns]].copy()
+    if not summary.empty:
+        summary = summary.rename(columns={"student_code": "کد پژوهشی", "status": "وضعیت"})
+        if not assessments.empty:
+            for kind, label in [("pretest", "نمره پیش‌آزمون"), ("posttest", "نمره پس‌آزمون")]:
+                sub = assessments.loc[assessments["assessment_type"] == kind, ["student_code", "total_score"]].copy()
+                if not sub.empty:
+                    sub = sub.sort_values("student_code").drop_duplicates("student_code", keep="last")
+                    sub[label] = sub["total_score"].map(lambda x: round(float(x), 1))
+                    summary = summary.merge(sub[["student_code", label]], left_on="کد پژوهشی", right_on="student_code", how="left").drop(columns=["student_code"])
+        if "نمره پیش‌آزمون" in summary.columns and "نمره پس‌آزمون" in summary.columns:
+            summary["تغییر نمره"] = summary["نمره پس‌آزمون"] - summary["نمره پیش‌آزمون"]
+
+    st.divider()
+    st.subheader("نتایج ثبت‌شده")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("شرکت‌کنندگان", to_persian_digits(len(participants)))
+    m2.metric("آزمون‌ها", to_persian_digits(len(assessments)))
+    m3.metric("گزارش‌های روزانه", to_persian_digits(len(daily)))
+
+    if not summary.empty:
+        st.markdown("### خلاصه نتایج هر شرکت‌کننده")
+        summary_view = summary.copy()
+        for col in ["نمره پیش‌آزمون", "نمره پس‌آزمون", "تغییر نمره"]:
+            if col in summary_view.columns:
+                summary_view[col] = summary_view[col].map(lambda x: to_persian_digits(round(float(x), 1)) if pd.notna(x) else "")
+        st.dataframe(summary_view, use_container_width=True, hide_index=True)
+
+    if participants.empty:
+        st.info("هنوز شرکت‌کننده‌ای ثبت نشده است.")
+    else:
+        show_cols = ["student_code", "گروه", "تاریخ شروع", "تاریخ پایان", "status", "رضایت", "تاریخ ثبت شمسی"]
+        view = participants[[c for c in show_cols if c in participants.columns]].rename(columns={"student_code": "کد پژوهشی", "status": "وضعیت"})
+        st.dataframe(view, use_container_width=True, hide_index=True)
+
+    tabs = st.tabs(list(dataframes.keys()))
+    for tab, (name, df) in zip(tabs, dataframes.items()):
+        with tab:
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("خروجی پژوهش")
+    excel = _make_excel(dataframes)
+    st.download_button(
+        "دانلود نتایج به صورت Excel",
+        data=excel,
+        file_name="research_results.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+
+if str(st.query_params.get("page", "")).strip().lower() == "researcher":
+    # Researcher authentication state is initialized before this branch.
+    if "researcher_authenticated" not in st.session_state:
+        st.session_state.researcher_authenticated = False
+    render_researcher_page()
+    st.stop()
 
 # ============================================================
 # Session initialization
@@ -735,52 +1089,58 @@ for key, default in {
     "participant": None,
     "pending_participant_code": "",
     "pending_participant": None,
+    "researcher_authenticated": False,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
 
 
 def render_participant_info_form(code, participant):
     """Collect and persist the seven demographic/educational model inputs."""
     st.subheader("تکمیل اطلاعات شرکت‌کننده")
     st.caption(
-        "این اطلاعات برای اجرای مدل و شخصی‌سازی نحوه ارائه مداخله "
+        "این اطلاعات برای اجرای مدل و شخصی‌سازی نحوه ارائه برنامه "
         "ثبت می‌شوند. کد پژوهشی ناشناس باقی می‌ماند."
     )
 
     with st.form("participant_info_form"):
         c1, c2 = st.columns(2)
         with c1:
-            age = st.number_input("سن", min_value=15, max_value=80, value=20, step=1)
+            age_raw = st.text_input("سن", value="۲۰", placeholder="مثلاً ۲۰")
             gender = st.selectbox("جنسیت", ["زن", "مرد"])
             degree = st.selectbox("مقطع تحصیلی", ["کارشناسی", "کارشناسی ارشد", "دکتری"])
-            semester = st.number_input("ترم تحصیلی", min_value=1, max_value=20, value=1, step=1)
+            semester_raw = st.text_input("ترم تحصیلی", value="۱", placeholder="مثلاً ۴")
         with c2:
             daily_use = st.selectbox(
                 "میزان استفاده روزانه از آموزش الکترونیکی",
-                [
-                    "کمتر از ۲ ساعت",
-                    "از ۲ تا ۴ ساعت",
-                    "از ۴ تا ۶ ساعت",
-                    "بیشتر از ۶ ساعت",
-                ],
+                ["کمتر از ۲ ساعت", "۲ تا ۴ ساعت", "۴ تا ۶ ساعت", "بیشتر از ۶ ساعت"],
             )
+            university = st.selectbox("نوع دانشگاه", ["آزاد", "دولتی", "غیرانتفاعی", "مجازی"])
+            major = st.text_input("رشته تحصیلی", placeholder="مثلاً مهندسی کامپیوتر")
 
-            university = st.selectbox(
-                "نوع دانشگاه",
-                ["آزاد", "دولتی", "غیرانتفاعی", "مجازی"],
-            )
+        submitted = st.form_submit_button("ثبت اطلاعات و ادامه", type="primary", use_container_width=True)
 
-            major = st.text_input(
-                "رشته تحصیلی",
-                placeholder="مثلاً مهندسی کامپیوتر",
-            )
+    if not submitted:
+        return
 
-        submitted = st.form_submit_button(
-            "ثبت اطلاعات و ادامه",
-            type="primary",
-            use_container_width=True
-        )
+    if not major.strip():
+        st.error("رشته تحصیلی را وارد کنید.")
+        return
+
+    def _parse_fa_int(value):
+        normalized = str(value).translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")).strip()
+        return int(normalized) if normalized.isdigit() else None
+
+    age = _parse_fa_int(age_raw)
+    semester = _parse_fa_int(semester_raw)
+    if age is None or not 15 <= age <= 80:
+        st.error("سن را بین ۱۵ تا ۸۰ سال وارد کنید.")
+        return
+    if semester is None or not 1 <= semester <= 20:
+        st.error("ترم تحصیلی را بین ۱ تا ۲۰ وارد کنید.")
+        return
+
     student_data = {
         "student_code": code,
         "age": int(age),
@@ -922,7 +1282,12 @@ if study_day is None:
     st.error("تاریخ شروع مطالعه برای این شرکت‌کننده مشخص نیست.")
     st.stop()
 
-st.caption(f"کد پژوهشی: {student_code} | روز مطالعه: {study_day} از 7")
+study_date = get_study_date(student_code, study_day)
+study_date_text = jalali_from_gregorian(study_date) if study_date else ""
+st.markdown(
+    f'<div class="study-meta">کد پژوهشی: {student_code} | روز {to_persian_digits(study_day)} از {to_persian_digits(7)} | تاریخ: {to_persian_digits(study_date_text)}</div>',
+    unsafe_allow_html=True,
+)
 
 
 # ============================================================
@@ -942,7 +1307,7 @@ if participant["status"] == "completed":
 if not has_assessment(student_code, "pretest"):
     st.warning(
         "مرحله اول مطالعه: پیش‌آزمون. "
-        "هر دو گروه مداخله و کنترل باید این مرحله را تکمیل کنند."
+        "این مرحله برای همه شرکت‌کنندگان یکسان است."
     )
 
     answers = questionnaire_form(
@@ -960,18 +1325,7 @@ if not has_assessment(student_code, "pretest"):
             st.session_state["pretest_saved"] = True
             st.success("پیش‌آزمون با موفقیت ثبت شد.")
             render_result_summary(result)
-
-            if participant["group_type"] == "intervention":
-                st.info(
-                    "گروه شما در بخش مداخله قرار دارد. "
-                    "از این مرحله به بعد، سامانه بر اساس الگوی رفتاری ثبت‌شده "
-                    "مداخله عملیاتی را نمایش می‌دهد."
-                )
-            else:
-                st.info(
-                    "پیش‌آزمون ثبت شد. در طول این هفته مداخله اختصاصی سامانه "
-                    "برای گروه کنترل نمایش داده نمی‌شود."
-                )
+            st.info("پیش‌آزمون ثبت شد. برنامه روزانه بر اساس ساختار تعیین‌شده برای این شرکت‌کننده نمایش داده می‌شود.")
 
             st.rerun()
 
@@ -988,14 +1342,13 @@ if not has_assessment(student_code, "pretest"):
 if 1 <= study_day <= 7:
 
     if participant["group_type"] == "control":
-        st.subheader(f"گروه کنترل — روز {study_day}")
+        st.subheader(f"برنامه امروز — روز {to_persian_digits(study_day)}")
 
         st.markdown(
             """
             <div class="card">
                 <h3>روال معمول آموزشی</h3>
                 <p>
-                در این مرحله مداخله اختصاصی سامانه نمایش داده نمی‌شود.
                 روال معمول آموزشی خود را ادامه دهید.
                 </p>
                 <p class="small">
@@ -1007,25 +1360,19 @@ if 1 <= study_day <= 7:
         )
 
     else:
-        st.subheader(f"گروه مداخله — روز {study_day}")
+        st.subheader(f"برنامه امروز — روز {to_persian_digits(study_day)}")
 
         # The intervention is fixed from day 1 so the pilot does not
         # silently change intervention type during the week.
         saved = get_study_interventions(student_code, day_number=1)
 
         if not saved:
-            st.error("مداخله روز اول در پایگاه داده پیدا نشد.")
+            st.error("برنامه روز اول در پایگاه داده پیدا نشد.")
         else:
             st.markdown(
                 """
                 <div class="card">
-                    <h3>مداخله شخصی‌سازی‌شده</h3>
-                    <p class="small">
-                    نوع مداخله بر اساس الگوی رفتاری استخراج‌شده از پرسشنامه
-                    انتخاب شده است. ویژگی‌های جمعیت‌شناختی/آموزشی برای
-                    شخصی‌سازی زمینه و نحوه ارائه استفاده می‌شوند و به‌تنهایی
-                    تعیین‌کننده نوع مداخله نیستند.
-                    </p>
+                    <h3>برنامه امروز</h3>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1061,6 +1408,25 @@ if 1 <= study_day <= 7:
             existing_log = get_daily_log(student_code, study_day)
 
             with st.form(f"daily_log_{study_day}"):
+                primary_profile = saved[0][4] if saved else "general_procrastination"
+                checkin_question = get_daily_checkin_question(primary_profile, study_day)
+                st.markdown(f"**پایش کوتاه امروز**\n\n{checkin_question}")
+
+                checkin_options = [
+                    "خیلی کم",
+                    "کم",
+                    "متوسط",
+                    "زیاد",
+                    "خیلی زیاد",
+                ]
+                existing_checkin = (existing_log[9] if existing_log and len(existing_log) > 9 else "")
+                checkin_answer = st.radio(
+                    "پاسخ کوتاه امروز",
+                    checkin_options,
+                    index=checkin_options.index(existing_checkin) if existing_checkin in checkin_options else None,
+                    horizontal=True,
+                )
+
                 status_labels = {
                     "not_started": "هنوز شروع نکردم",
                     "partial": "بخشی از آن را انجام دادم",
@@ -1080,14 +1446,14 @@ if 1 <= study_day <= 7:
                     index=status_values.index(default_status),
                     format_func=lambda x: status_labels[x],
                 )
-
-                minutes = st.number_input(
+                minutes_raw = st.text_input(
                     "مدت اجرای فعالیت (دقیقه)",
-                    min_value=0,
-                    max_value=600,
-                    value=int(existing_log[4] or 0) if existing_log else 0,
-                    step=5,
+                    value="",
+                    placeholder="مثلاً ۳۰",
+                    key=f"minutes_day_{student_code}_{study_day}",
                 )
+                normalized_minutes = str(minutes_raw).translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")).strip()
+                minutes = int(normalized_minutes) if normalized_minutes.isdigit() else None
 
                 notes = st.text_area(
                     "یادداشت اختیاری",
@@ -1099,17 +1465,28 @@ if 1 <= study_day <= 7:
                     type="primary",
                     use_container_width=True,
                 )
-
             if submitted:
-                save_daily_log(
-                    student_code=student_code,
-                    day_number=study_day,
-                    action_status=status,
-                    actual_minutes=int(minutes),
-                    coach_used=bool(existing_log[5]) if existing_log else False,
-                    notes=notes,
-                )
-                st.success("گزارش فعالیت امروز ثبت شد.")
+                if checkin_answer is None:
+                    st.error("پاسخ پایش کوتاه امروز را انتخاب کنید.")
+                elif minutes is not None and (minutes < 0 or minutes > 600):
+                    st.error("مدت اجرا باید بین صفر تا ۶۰۰ دقیقه باشد.")
+                elif minutes is None and status != "not_started":
+                    st.error("مدت اجرای فعالیت را وارد کنید.")
+                else:
+                    actual_minutes = minutes
+                    if actual_minutes is None and existing_log:
+                        actual_minutes = existing_log[4]
+                    save_daily_log(
+                        student_code=student_code,
+                        day_number=study_day,
+                        action_status=status,
+                        actual_minutes=actual_minutes,
+                        coach_used=bool(existing_log[5]) if existing_log else False,
+                        notes=notes,
+                        checkin_question=checkin_question,
+                        checkin_answer=checkin_answer,
+                    )
+                    st.success("گزارش فعالیت امروز ثبت شد.")
 
     # --------------------------------------------------------
     # AI Coach — available to intervention group only
@@ -1147,6 +1524,7 @@ if 1 <= study_day <= 7:
                             student_message=student_message.strip(),
                             student_context=student,
                         )
+                        response = str(response).replace("مداخله", "برنامه")
 
                         st.markdown(
                             f"""
@@ -1173,16 +1551,84 @@ if 1 <= study_day <= 7:
                                 existing[3] if existing else "not_started"
                             ),
                             actual_minutes=(
-                                existing[4] if existing else 0
+                                existing[4] if existing else None
                             ),
                             coach_used=True,
                             notes=(
                                 existing[6] if existing else ""
                             ),
+                            checkin_question=(
+                                existing[8] if existing and len(existing) > 8 else ""
+                            ),
+                            checkin_answer=(
+                                existing[9] if existing and len(existing) > 9 else ""
+                            ),
                         )
 
                     except Exception as exc:
                         st.error(f"مربی هوشمند در دسترس نیست: {exc}")
+
+
+# ============================================================
+# End-of-day exit — intervention group
+# ============================================================
+
+if 1 <= study_day < 7 and participant["group_type"] == "intervention":
+    st.divider()
+    st.subheader("پایان روز")
+    st.caption(
+        "پس از ثبت فعالیت و در صورت نیاز استفاده از مربی هوشمند، "
+        "برای خروج از مطالعه در این روز روی دکمه زیر بزن."
+    )
+
+    if st.button(
+        "ذخیره اطلاعات و پایان روز",
+        key=f"end_day_{study_day}",
+        type="secondary",
+        use_container_width=True,
+    ):
+        # Save the latest values again so changes are not lost when the user
+        # exits without pressing the daily form's save button a second time.
+        latest_log = get_daily_log(student_code, study_day)
+
+        current_status = status if "status" in locals() else (
+            latest_log[3] if latest_log else "not_started"
+        )
+        current_minutes = minutes if ("minutes" in locals() and minutes is not None) else (
+            latest_log[4] if latest_log else None
+        )
+        current_notes = notes if "notes" in locals() else (
+            latest_log[6] if latest_log else ""
+        )
+        current_checkin_question = (
+            checkin_question if "checkin_question" in locals() else (
+                latest_log[8] if latest_log and len(latest_log) > 8 else ""
+            )
+        )
+        current_checkin_answer = (
+            checkin_answer if "checkin_answer" in locals() else (
+                latest_log[9] if latest_log and len(latest_log) > 9 else ""
+            )
+        )
+
+        save_daily_log(
+            student_code=student_code,
+            day_number=study_day,
+            action_status=current_status,
+            actual_minutes=current_minutes,
+            coach_used=bool(latest_log[5]) if latest_log else False,
+            notes=current_notes,
+            checkin_question=current_checkin_question,
+            checkin_answer=current_checkin_answer,
+        )
+
+        st.success("اطلاعات امروز ذخیره شد و روز مطالعه پایان یافت.")
+        st.session_state.student_code = ""
+        st.session_state.student = None
+        st.session_state.participant = None
+        st.session_state.pending_participant_code = ""
+        st.session_state.pending_participant = None
+        st.stop()
 
 
 # ============================================================
@@ -1202,7 +1648,7 @@ if study_day >= 7:
         if posttest:
             st.metric(
                 "نمره پس‌آزمون",
-                f"{posttest[2]:.1f} از 110",
+                f"{to_persian_digits(f'{posttest[2]:.1f}')} از {to_persian_digits(110)}",
             )
 
         if participant["status"] != "completed":
@@ -1238,7 +1684,7 @@ if study_day >= 7:
             c1, c2 = st.columns(2)
             c1.metric(
                 "نمره پس‌آزمون",
-                f'{post_result["total_score"]:.1f} از 110',
+                f'{to_persian_digits(f"{post_result["total_score"]:.1f}")} از {to_persian_digits(110)}',
             )
             c2.metric(
                 "سطح پس‌آزمون",

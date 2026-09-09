@@ -1,7 +1,65 @@
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+
+import jdatetime
 
 from config import DB_PATH
+
+
+# ================================================================
+# Jalali date helpers
+# ================================================================
+
+PERSIAN_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+
+def to_persian_digits(value):
+    return str(value).translate(PERSIAN_DIGITS)
+
+
+def gregorian_to_jalali(gy, gm, gd):
+    d = jdatetime.date.fromgregorian(year=int(gy), month=int(gm), day=int(gd))
+    return d.year, d.month, d.day
+
+
+def jalali_to_gregorian(jy, jm, jd):
+    d = jdatetime.date(int(jy), int(jm), int(jd))
+    return d.togregorian()
+
+
+def jalali_from_gregorian(value):
+    if isinstance(value, datetime):
+        value = value.date()
+    d = jdatetime.date.fromgregorian(year=value.year, month=value.month, day=value.day)
+    return f"{d.year:04d}/{d.month:02d}/{d.day:02d}"
+
+
+def jalali_from_text(value):
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if "/" in text:
+        try:
+            y, m, d = [int(x) for x in text.split("/")[:3]]
+            if y >= 1300:
+                return f"{y:04d}/{m:02d}/{d:02d}"
+        except Exception:
+            pass
+    try:
+        return jalali_from_gregorian(date.fromisoformat(text[:10]))
+    except Exception:
+        return None
+
+
+def parse_study_date(value):
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if "/" in text:
+        y, m, d = [int(x) for x in text.split("/")[:3]]
+        if y >= 1300:
+            return jalali_to_gregorian(y, m, d)
+    return date.fromisoformat(text[:10])
 
 
 # ================================================================
@@ -36,9 +94,16 @@ def initialize_database():
             semester INTEGER,
             use_level TEXT,
             university TEXT,
-            major TEXT
+            major TEXT,
+            registered_at_jalali TEXT
         )
     """)
+
+    existing_student_columns = {
+        row[1] for row in cursor.execute("PRAGMA table_info(students)").fetchall()
+    }
+    if "registered_at_jalali" not in existing_student_columns:
+        cursor.execute("ALTER TABLE students ADD COLUMN registered_at_jalali TEXT")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS assessments (
@@ -238,6 +303,22 @@ def initialize_database():
             )
         )
     """)
+
+    # ------------------------------------------------------------
+    # Backward-compatible daily check-in fields.
+    # These fields store the short process question shown that day
+    # and the participant's answer; they are not part of the 22-item
+    # procrastination scale.
+    # ------------------------------------------------------------
+    existing_columns = {
+        row[1] for row in cursor.execute("PRAGMA table_info(daily_logs)").fetchall()
+    }
+
+    if "checkin_question" not in existing_columns:
+        cursor.execute("ALTER TABLE daily_logs ADD COLUMN checkin_question TEXT")
+
+    if "checkin_answer" not in existing_columns:
+        cursor.execute("ALTER TABLE daily_logs ADD COLUMN checkin_answer TEXT")
 
     # ============================================================
     # AI Coach interaction log
@@ -752,29 +833,19 @@ def register_study_participant(
             "group_type must be 'intervention' or 'control'"
         )
 
-    # If no start date is supplied, use today.
+    # Study dates are stored as Jalali strings.
     if start_date is None:
+        start_date = jalali_from_gregorian(date.today())
+    elif isinstance(start_date, (date, datetime)):
+        start_date = jalali_from_gregorian(start_date)
+    else:
+        start_date = jalali_from_text(start_date) or str(start_date)
 
-        start_date = date.today().isoformat()
-
-    # Convert date/datetime objects to strings.
-    if isinstance(
-        start_date,
-        (date, datetime)
-    ):
-
-        start_date = start_date.strftime(
-            "%Y-%m-%d"
-        )
-
-    if isinstance(
-        end_date,
-        (date, datetime)
-    ):
-
-        end_date = end_date.strftime(
-            "%Y-%m-%d"
-        )
+    if end_date is not None:
+        if isinstance(end_date, (date, datetime)):
+            end_date = jalali_from_gregorian(end_date)
+        else:
+            end_date = jalali_from_text(end_date) or str(end_date)
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -904,13 +975,27 @@ def get_study_day(
             today
         )
 
-    start = date.fromisoformat(
+    start = parse_study_date(
         participant["start_date"]
     )
 
     return (
         today - start
     ).days + 1
+
+
+def get_study_date(student_code, study_day=None):
+    participant = get_study_participant(student_code)
+    if participant is None or not participant.get("start_date"):
+        return None
+    start = parse_study_date(participant["start_date"])
+    if start is None:
+        return None
+    if study_day is None:
+        study_day = get_study_day(student_code)
+    if study_day is None:
+        return None
+    return start + timedelta(days=int(study_day) - 1)
 
 
 # ================================================================
@@ -929,9 +1014,9 @@ def complete_study_participant(student_code):
         UPDATE study_participants
         SET
             status = 'completed',
-            end_date = DATE('now')
+            end_date = ?
         WHERE student_code = ?
-    """, (student_code,))
+    """, (jalali_from_gregorian(date.today()), student_code))
 
     conn.commit()
     conn.close()
@@ -1119,16 +1204,20 @@ def save_daily_log(
     action_status,
     actual_minutes=None,
     coach_used=False,
-    notes=""
+    notes="",
+    checkin_question="",
+    checkin_answer="",
 ):
     """
     Save or update one daily activity record.
 
     action_status can be:
-
         "not_started"
         "partial"
         "completed"
+
+    checkin_question/checkin_answer are short daily process-monitoring
+    fields and are intentionally kept separate from the 22-item scale.
     """
 
     allowed_statuses = {
@@ -1138,7 +1227,6 @@ def save_daily_log(
     }
 
     if action_status not in allowed_statuses:
-
         raise ValueError(
             "action_status must be one of: "
             "not_started, partial, completed"
@@ -1154,16 +1242,11 @@ def save_daily_log(
             action_status,
             actual_minutes,
             coach_used,
-            notes
+            notes,
+            checkin_question,
+            checkin_answer
         )
-        VALUES (
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?
-        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 
         ON CONFLICT(
             student_code,
@@ -1175,6 +1258,8 @@ def save_daily_log(
             actual_minutes = excluded.actual_minutes,
             coach_used = excluded.coach_used,
             notes = excluded.notes,
+            checkin_question = excluded.checkin_question,
+            checkin_answer = excluded.checkin_answer,
             created_at = CURRENT_TIMESTAMP
     """, (
         student_code,
@@ -1182,7 +1267,9 @@ def save_daily_log(
         action_status,
         actual_minutes,
         int(bool(coach_used)),
-        notes
+        notes,
+        checkin_question,
+        checkin_answer,
     ))
 
     conn.commit()
@@ -1213,7 +1300,9 @@ def get_daily_log(
             actual_minutes,
             coach_used,
             notes,
-            created_at
+            created_at,
+            checkin_question,
+            checkin_answer
         FROM daily_logs
         WHERE student_code = ?
           AND day_number = ?

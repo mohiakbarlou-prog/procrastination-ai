@@ -33,3 +33,4 @@ test_profile_engine.py
 # OS
 Thumbs.db
 .DS_Store
+.streamlit/secrets.toml

@@ -5,3 +5,5 @@ scikit-learn
 joblib
 python-dotenv
 openai
+openpyxl
+jdatetime
