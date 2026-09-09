@@ -756,27 +756,31 @@ def render_participant_info_form(code, participant):
             degree = st.selectbox("مقطع تحصیلی", ["کارشناسی", "کارشناسی ارشد", "دکتری"])
             semester = st.number_input("ترم تحصیلی", min_value=1, max_value=20, value=1, step=1)
         with c2:
-           daily_use = st.selectbox(
-    "میزان استفاده روزانه از آموزش الکترونیکی",
-    [
-        "کمتر از ۲ ساعت",
-        "از ۲ تا ۴ ساعت",
-        "از ۴ تا ۶ ساعت",
-        "بیشتر از ۶ ساعت",
-    ],
-)
-            university = st.selectbox("نوع دانشگاه", ["آزاد", "دولتی", "غیرانتفاعی", "مجازی"])
-            major = st.text_input("رشته تحصیلی", placeholder="مثلاً مهندسی کامپیوتر")
+            daily_use = st.selectbox(
+                "میزان استفاده روزانه از آموزش الکترونیکی",
+                [
+                    "کمتر از ۲ ساعت",
+                    "از ۲ تا ۴ ساعت",
+                    "از ۴ تا ۶ ساعت",
+                    "بیشتر از ۶ ساعت",
+                ],
+            )
 
-        submitted = st.form_submit_button("ثبت اطلاعات و ادامه", type="primary", use_container_width=True)
+            university = st.selectbox(
+                "نوع دانشگاه",
+                ["آزاد", "دولتی", "غیرانتفاعی", "مجازی"],
+            )
 
-    if not submitted:
-        return
+            major = st.text_input(
+                "رشته تحصیلی",
+                placeholder="مثلاً مهندسی کامپیوتر",
+            )
 
-    if not major.strip():
-        st.error("رشته تحصیلی را وارد کنید.")
-        return
-
+        submitted = st.form_submit_button(
+            "ثبت اطلاعات و ادامه",
+            type="primary",
+            use_container_width=True
+        )
     student_data = {
         "student_code": code,
         "age": int(age),
