@@ -28,6 +28,10 @@ from database import (
     save_daily_log,
     get_daily_log,
     save_coach_log,
+    save_student,
+    load_student,
+    verify_researcher_code,
+    complete_study_participant,
 )
 
 try:
@@ -548,81 +552,6 @@ def profile_label(profile):
     return PROFILE_NAMES.get(profile, profile or "الگوی رفتاری")
 
 
-def save_student(student_data):
-    """Persist the seven demographic/educational fields plus Jalali registration date."""
-    conn = get_connection()
-    try:
-        registered = jalali_from_gregorian(date.today())
-        conn.execute(
-            """
-            INSERT INTO students (
-                student_code, age, gender, degree, semester,
-                use_level, university, major, registered_at_jalali
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(student_code)
-            DO UPDATE SET
-                age = excluded.age,
-                gender = excluded.gender,
-                degree = excluded.degree,
-                semester = excluded.semester,
-                use_level = excluded.use_level,
-                university = excluded.university,
-                major = excluded.major,
-                registered_at_jalali = COALESCE(
-                    students.registered_at_jalali,
-                    excluded.registered_at_jalali
-                )
-            """,
-            (
-                student_data["student_code"],
-                int(student_data["age"]),
-                student_data["gender"],
-                student_data["degree"],
-                int(student_data["semester"]),
-                student_data["daily_use"],
-                student_data["university"],
-                student_data["major"],
-                registered,
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def load_student(student_code):
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            """
-            SELECT
-                student_code, age, gender, degree, semester,
-                use_level, university, major, registered_at_jalali
-            FROM students
-            WHERE student_code = ?
-            """,
-            (student_code,),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    if row is None:
-        return None
-
-    return {
-        "student_code": row[0],
-        "age": row[1],
-        "gender": row[2],
-        "degree": row[3],
-        "semester": row[4],
-        "daily_use": row[5],
-        "university": row[6],
-        "major": row[7],
-        "registered_at_jalali": row[8],
-    }
-
-
 def row_to_intervention(row):
     """Convert a study_interventions DB row into the minimal intervention object."""
     return {
@@ -978,6 +907,7 @@ def ensure_daily_interventions(student, study_day, base_result):
 
     return get_study_interventions(student_code, day_number=int(study_day))
 
+
 def render_result_summary(result):
     c1, c2, c3 = st.columns(3)
     total_text = to_persian_digits(f"{result['total_score']:.1f}")
@@ -1021,6 +951,7 @@ def build_today_monitoring(today_log):
         "checkin_question": today_log[8] if len(today_log) > 8 else "",
         "checkin_answer": today_log[9] if len(today_log) > 9 else "",
     }
+
 
 def get_daily_checkin_question(profile, day_number):
     """Return one concise daily process-monitoring question.
@@ -1126,13 +1057,6 @@ GROUP_LABELS = {
 }
 
 
-def _safe_admin_key():
-    try:
-        return str(st.secrets.get("ADMIN_KEY", "")).strip()
-    except Exception:
-        return ""
-
-
 def _jalali_created(value):
     if not value:
         return ""
@@ -1232,24 +1156,32 @@ def render_researcher_page():
         """
         <div class="researcher-title">
             <h1>صفحه پژوهشگر</h1>
-            <div class="researcher-note">این صفحه فقط با رمز پژوهشگر قابل دسترسی است و در مسیر معمول شرکت‌کننده نمایش داده نمی‌شود.</div>
+            <div class="researcher-note">این صفحه فقط با کد پژوهشگر قابل دسترسی است و در مسیر معمول شرکت‌کننده نمایش داده نمی‌شود.</div>
         </div>
         """, unsafe_allow_html=True
     )
 
     if not st.session_state.get("researcher_authenticated", False):
         with st.form("researcher_login"):
-            password = st.text_input("رمز پژوهشگر", type="password")
+            code = st.text_input("کد پژوهشگر", type="password")
             submitted = st.form_submit_button("ثبت و بررسی", type="primary", use_container_width=True)
+
         if submitted:
-            saved = _safe_admin_key()
-            if not saved:
-                st.error("ADMIN_KEY در Streamlit Secrets ثبت نشده است.")
-            elif password == saved:
-                st.session_state.researcher_authenticated = True
-                st.rerun()
+            if not code.strip():
+                st.error("کد پژوهشگر را وارد کنید.")
             else:
-                st.error("رمز پژوهشگر نادرست است.")
+                try:
+                    researcher = verify_researcher_code(code.strip())
+                except Exception as exc:
+                    researcher = None
+                    st.error(f"خطا در بررسی کد: {exc}")
+
+                if researcher:
+                    st.session_state.researcher_authenticated = True
+                    st.session_state.researcher_role = researcher.get("role", "researcher")
+                    st.rerun()
+                else:
+                    st.error("کد پژوهشگر نادرست است.")
         return
 
     st.success("دسترسی پژوهشگر تأیید شد.")
@@ -1257,12 +1189,12 @@ def render_researcher_page():
     with col_a:
         if st.button("خروج پژوهشگر", use_container_width=True):
             st.session_state.researcher_authenticated = False
+            st.session_state.researcher_role = "researcher"
             st.rerun()
     with col_b:
         st.caption("آخرین داده‌های ثبت‌شده از سامانه")
 
     st.info("روز مطالعه هر شرکت‌کننده به‌صورت خودکار بر اساس تاریخ شروع مطالعه محاسبه می‌شود.")
-
 
     st.subheader("ثبت شرکت‌کننده")
     with st.form("researcher_register"):
@@ -1344,6 +1276,8 @@ if str(st.query_params.get("page", "")).strip().lower() == "researcher":
     # Researcher authentication state is initialized before this branch.
     if "researcher_authenticated" not in st.session_state:
         st.session_state.researcher_authenticated = False
+    if "researcher_role" not in st.session_state:
+        st.session_state.researcher_role = "researcher"
     render_researcher_page()
     st.stop()
 
@@ -1358,6 +1292,7 @@ for key, default in {
     "pending_participant_code": "",
     "pending_participant": None,
     "researcher_authenticated": False,
+    "researcher_role": "researcher",
     "consent_saved": False,
     "day_ended": None,
     "posttest_saved": False,
@@ -1366,16 +1301,19 @@ for key, default in {
         st.session_state[key] = default
 
 
-
 def set_study_consent(student_code, consent=True):
-    """Persist participant consent using the existing database connection."""
+    """Persist participant consent using PostgreSQL syntax."""
     conn = get_connection()
     try:
-        conn.execute(
-            "UPDATE study_participants SET consent = ? WHERE student_code = ?",
-            (1 if consent else 0, student_code),
-        )
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE study_participants SET consent = %s WHERE student_code = %s",
+                (1 if consent else 0, student_code),
+            )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -2035,8 +1973,6 @@ if study_day >= 7:
             )
 
         if participant["status"] != "completed":
-            # Completion is explicit after the posttest exists.
-            from database import complete_study_participant
             complete_study_participant(student_code)
 
         st.info("مطالعه برای این کد پژوهشی تکمیل شد.")
@@ -2059,7 +1995,6 @@ if study_day >= 7:
                 post_answers,
             )
 
-            from database import complete_study_participant
             complete_study_participant(student_code)
 
             st.success("پس‌آزمون با موفقیت ثبت شد.")

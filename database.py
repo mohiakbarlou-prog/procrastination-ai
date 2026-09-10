@@ -1,26 +1,70 @@
-import sqlite3
+import os
 from datetime import date, datetime, timedelta
 
+import psycopg2
 import jdatetime
 
-from config import DB_PATH
 
+# ================================================================
+# Connection
+# ================================================================
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    """Return a PostgreSQL connection using DATABASE_URL.
 
+    Priority:
+      1) Streamlit Secrets["DATABASE_URL"]
+      2) Environment variable DATABASE_URL
+    Never hardcode credentials in source code.
+    """
+    db_url = ""
 
-def _ensure_column(cursor, table_name, column_name, definition):
-    columns = {
-        row[1]
-        for row in cursor.execute(f"PRAGMA table_info({table_name})").fetchall()
-    }
-    if column_name not in columns:
-        cursor.execute(
-            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+    # تلاش برای خواندن از Streamlit Secrets
+    try:
+        import streamlit as st
+        db_url = str(st.secrets.get("DATABASE_URL", "")).strip()
+    except Exception:
+        pass
+
+    # fallback به متغیر محیطی
+    if not db_url:
+        db_url = os.environ.get("DATABASE_URL", "").strip()
+
+    if not db_url:
+        raise RuntimeError(
+            "DATABASE_URL تنظیم نشده است. "
+            "آن را در Streamlit Secrets یا متغیر محیطی قرار بده."
         )
+
+    return psycopg2.connect(db_url)
+
+
+# ================================================================
+# Researcher authentication
+# ================================================================
+
+def verify_researcher_code(code):
+    if not code:
+        return None
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT researcher_code, role
+                FROM researchers
+                WHERE researcher_code = %s
+                """,
+                (code,),
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if row:
+        return {"code": row[0], "role": row[1]}
+    return None
 
 
 # ================================================================
@@ -48,143 +92,176 @@ def to_persian_digits(value):
 
 
 # ================================================================
-# Database initialization + migration
+# Schema migration helper
+# ================================================================
+
+def _ensure_column(cursor, table_name, column_name, definition):
+    """Add a column if it does not exist (PostgreSQL version)."""
+    cursor.execute(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = %s AND column_name = %s
+        """,
+        (table_name, column_name),
+    )
+    if cursor.fetchone() is None:
+        cursor.execute(
+            f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {definition}'
+        )
+
+
+# ================================================================
+# Database initialization
 # ================================================================
 
 def initialize_database():
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS researchers (
+                    id SERIAL PRIMARY KEY,
+                    researcher_code TEXT UNIQUE NOT NULL,
+                    role TEXT DEFAULT 'researcher',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS students (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_code TEXT UNIQUE,
-            age INTEGER,
-            gender TEXT,
-            degree TEXT,
-            semester INTEGER,
-            use_level TEXT,
-            university TEXT,
-            major TEXT,
-            registered_at_jalali TEXT
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS students (
+                    id SERIAL PRIMARY KEY,
+                    student_code TEXT UNIQUE NOT NULL,
+                    age INTEGER,
+                    gender TEXT,
+                    degree TEXT,
+                    semester INTEGER,
+                    use_level TEXT,
+                    university TEXT,
+                    major TEXT,
+                    registered_at_jalali TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS assessments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_code TEXT,
-            assessment_type TEXT,
-            total_score REAL,
-            level TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS assessments (
+                    id SERIAL PRIMARY KEY,
+                    student_code TEXT,
+                    assessment_type TEXT,
+                    total_score DOUBLE PRECISION,
+                    level TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS interventions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_code TEXT,
-            profile TEXT,
-            intervention_name TEXT,
-            intervention_description TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS interventions (
+                    id SERIAL PRIMARY KEY,
+                    student_code TEXT,
+                    profile TEXT,
+                    intervention_name TEXT,
+                    intervention_description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS activities (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_code TEXT,
-            task_name TEXT,
-            planned_minutes INTEGER,
-            actual_minutes INTEGER,
-            completed INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS activities (
+                    id SERIAL PRIMARY KEY,
+                    student_code TEXT,
+                    task_name TEXT,
+                    planned_minutes INTEGER,
+                    actual_minutes INTEGER,
+                    completed INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS study_participants (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_code TEXT UNIQUE,
-            group_type TEXT NOT NULL,
-            start_date TEXT,
-            end_date TEXT,
-            status TEXT DEFAULT 'active',
-            consent INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS study_participants (
+                    id SERIAL PRIMARY KEY,
+                    student_code TEXT UNIQUE,
+                    group_type TEXT NOT NULL,
+                    start_date TEXT,
+                    end_date TEXT,
+                    status TEXT DEFAULT 'active',
+                    consent INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS assessment_responses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            assessment_id INTEGER UNIQUE,
-            q1 INTEGER, q2 INTEGER, q3 INTEGER, q4 INTEGER,
-            q5 INTEGER, q6 INTEGER, q7 INTEGER, q8 INTEGER,
-            q9 INTEGER, q10 INTEGER, q11 INTEGER, q12 INTEGER,
-            q13 INTEGER, q14 INTEGER, q15 INTEGER, q16 INTEGER,
-            q17 INTEGER, q18 INTEGER, q19 INTEGER, q20 INTEGER,
-            q21 INTEGER, q22 INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (assessment_id) REFERENCES assessments(id)
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS assessment_responses (
+                    id SERIAL PRIMARY KEY,
+                    assessment_id INTEGER UNIQUE REFERENCES assessments(id) ON DELETE CASCADE,
+                    q1 INTEGER, q2 INTEGER, q3 INTEGER, q4 INTEGER,
+                    q5 INTEGER, q6 INTEGER, q7 INTEGER, q8 INTEGER,
+                    q9 INTEGER, q10 INTEGER, q11 INTEGER, q12 INTEGER,
+                    q13 INTEGER, q14 INTEGER, q15 INTEGER, q16 INTEGER,
+                    q17 INTEGER, q18 INTEGER, q19 INTEGER, q20 INTEGER,
+                    q21 INTEGER, q22 INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS study_interventions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_code TEXT,
-            day_number INTEGER,
-            intervention_order INTEGER DEFAULT 1,
-            profile TEXT,
-            profile_score REAL,
-            profile_level TEXT,
-            overall_level TEXT,
-            estimated_level TEXT,
-            intervention_name TEXT,
-            intervention_description TEXT,
-            intensity TEXT,
-            shown_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(student_code, day_number, intervention_order)
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS study_interventions (
+                    id SERIAL PRIMARY KEY,
+                    student_code TEXT,
+                    day_number INTEGER,
+                    intervention_order INTEGER DEFAULT 1,
+                    profile TEXT,
+                    profile_score DOUBLE PRECISION,
+                    profile_level TEXT,
+                    overall_level TEXT,
+                    estimated_level TEXT,
+                    intervention_name TEXT,
+                    intervention_description TEXT,
+                    intensity TEXT,
+                    shown_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (student_code, day_number, intervention_order)
+                )
+            """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS daily_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_code TEXT,
-            day_number INTEGER,
-            action_status TEXT,
-            actual_minutes INTEGER,
-            coach_used INTEGER DEFAULT 0,
-            notes TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            checkin_question TEXT,
-            checkin_answer TEXT,
-            UNIQUE(student_code, day_number)
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS daily_logs (
+                    id SERIAL PRIMARY KEY,
+                    student_code TEXT,
+                    day_number INTEGER,
+                    action_status TEXT,
+                    actual_minutes INTEGER,
+                    coach_used INTEGER DEFAULT 0,
+                    notes TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    checkin_question TEXT,
+                    checkin_answer TEXT,
+                    UNIQUE (student_code, day_number)
+                )
+            """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS coach_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_code TEXT,
-            day_number INTEGER,
-            student_message TEXT,
-            coach_response TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS coach_logs (
+                    id SERIAL PRIMARY KEY,
+                    student_code TEXT,
+                    day_number INTEGER,
+                    student_message TEXT,
+                    coach_response TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-    # Existing databases created with older versions need these columns.
-    _ensure_column(cursor, "students", "registered_at_jalali", "TEXT")
-    _ensure_column(cursor, "daily_logs", "checkin_question", "TEXT")
-    _ensure_column(cursor, "daily_logs", "checkin_answer", "TEXT")
+            # ستون‌های سازگاری برای دیتابیس‌های قدیمی‌تر
+            _ensure_column(cur, "students", "registered_at_jalali", "TEXT")
+            _ensure_column(cur, "daily_logs", "checkin_question", "TEXT")
+            _ensure_column(cur, "daily_logs", "checkin_answer", "TEXT")
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # ================================================================
@@ -195,35 +272,39 @@ def save_student(student_data):
     registered = jalali_from_gregorian(date.today())
     conn = get_connection()
     try:
-        conn.execute("""
-            INSERT INTO students (
-                student_code, age, gender, degree, semester,
-                use_level, university, major, registered_at_jalali
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(student_code) DO UPDATE SET
-                age = excluded.age,
-                gender = excluded.gender,
-                degree = excluded.degree,
-                semester = excluded.semester,
-                use_level = excluded.use_level,
-                university = excluded.university,
-                major = excluded.major,
-                registered_at_jalali = COALESCE(
-                    students.registered_at_jalali,
-                    excluded.registered_at_jalali
-                )
-        """, (
-            student_data["student_code"],
-            int(student_data["age"]),
-            student_data["gender"],
-            student_data["degree"],
-            int(student_data["semester"]),
-            student_data["daily_use"],
-            student_data["university"],
-            student_data["major"],
-            registered,
-        ))
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO students (
+                    student_code, age, gender, degree, semester,
+                    use_level, university, major, registered_at_jalali
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (student_code) DO UPDATE SET
+                    age = EXCLUDED.age,
+                    gender = EXCLUDED.gender,
+                    degree = EXCLUDED.degree,
+                    semester = EXCLUDED.semester,
+                    use_level = EXCLUDED.use_level,
+                    university = EXCLUDED.university,
+                    major = EXCLUDED.major,
+                    registered_at_jalali = COALESCE(
+                        students.registered_at_jalali,
+                        EXCLUDED.registered_at_jalali
+                    )
+            """, (
+                student_data["student_code"],
+                int(student_data["age"]),
+                student_data["gender"],
+                student_data["degree"],
+                int(student_data["semester"]),
+                student_data["daily_use"],
+                student_data["university"],
+                student_data["major"],
+                registered,
+            ))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -231,12 +312,14 @@ def save_student(student_data):
 def load_student(student_code):
     conn = get_connection()
     try:
-        row = conn.execute("""
-            SELECT student_code, age, gender, degree, semester,
-                   use_level, university, major, registered_at_jalali
-            FROM students
-            WHERE student_code = ?
-        """, (student_code,)).fetchone()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT student_code, age, gender, degree, semester,
+                       use_level, university, major, registered_at_jalali
+                FROM students
+                WHERE student_code = %s
+            """, (student_code,))
+            row = cur.fetchone()
     finally:
         conn.close()
 
@@ -263,14 +346,19 @@ def load_student(student_code):
 def save_assessment(student_code, assessment_type, total_score, level):
     conn = get_connection()
     try:
-        cur = conn.execute("""
-            INSERT INTO assessments (
-                student_code, assessment_type, total_score, level
-            ) VALUES (?, ?, ?, ?)
-        """, (student_code, assessment_type, total_score, level))
-        assessment_id = cur.lastrowid
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO assessments (
+                    student_code, assessment_type, total_score, level
+                ) VALUES (%s, %s, %s, %s)
+                RETURNING id
+            """, (student_code, assessment_type, total_score, level))
+            assessment_id = cur.fetchone()[0]
         conn.commit()
         return assessment_id
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -278,14 +366,16 @@ def save_assessment(student_code, assessment_type, total_score, level):
 def get_assessment(student_code, assessment_type):
     conn = get_connection()
     try:
-        return conn.execute("""
-            SELECT id, student_code, assessment_type,
-                   total_score, level, created_at
-            FROM assessments
-            WHERE student_code = ? AND assessment_type = ?
-            ORDER BY id DESC
-            LIMIT 1
-        """, (student_code, assessment_type)).fetchone()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, student_code, assessment_type,
+                       total_score, level, created_at
+                FROM assessments
+                WHERE student_code = %s AND assessment_type = %s
+                ORDER BY id DESC
+                LIMIT 1
+            """, (student_code, assessment_type))
+            return cur.fetchone()
     finally:
         conn.close()
 
@@ -310,17 +400,30 @@ def save_assessment_responses(assessment_id, answers):
     values = _normalize_answers(answers)
     conn = get_connection()
     try:
-        conn.execute("""
-            INSERT OR REPLACE INTO assessment_responses (
-                assessment_id,
-                q1,q2,q3,q4,q5,q6,q7,q8,q9,q10,q11,
-                q12,q13,q14,q15,q16,q17,q18,q19,q20,q21,q22
-            ) VALUES (
-                ?,?,?,?,?,?,?,?,?,?,?,?,
-                ?,?,?,?,?,?,?,?,?,?,?
-            )
-        """, (assessment_id, *values))
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO assessment_responses (
+                    assessment_id,
+                    q1,q2,q3,q4,q5,q6,q7,q8,q9,q10,q11,
+                    q12,q13,q14,q15,q16,q17,q18,q19,q20,q21,q22
+                ) VALUES (
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+                )
+                ON CONFLICT (assessment_id) DO UPDATE SET
+                    q1 = EXCLUDED.q1,   q2 = EXCLUDED.q2,   q3 = EXCLUDED.q3,
+                    q4 = EXCLUDED.q4,   q5 = EXCLUDED.q5,   q6 = EXCLUDED.q6,
+                    q7 = EXCLUDED.q7,   q8 = EXCLUDED.q8,   q9 = EXCLUDED.q9,
+                    q10 = EXCLUDED.q10, q11 = EXCLUDED.q11, q12 = EXCLUDED.q12,
+                    q13 = EXCLUDED.q13, q14 = EXCLUDED.q14, q15 = EXCLUDED.q15,
+                    q16 = EXCLUDED.q16, q17 = EXCLUDED.q17, q18 = EXCLUDED.q18,
+                    q19 = EXCLUDED.q19, q20 = EXCLUDED.q20, q21 = EXCLUDED.q21,
+                    q22 = EXCLUDED.q22
+            """, (assessment_id, *values))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -331,23 +434,26 @@ def save_assessment_with_responses(
     values = _normalize_answers(answers)
     conn = get_connection()
     try:
-        cur = conn.execute("""
-            INSERT INTO assessments (
-                student_code, assessment_type, total_score, level
-            ) VALUES (?, ?, ?, ?)
-        """, (student_code, assessment_type, total_score, level))
-        assessment_id = cur.lastrowid
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO assessments (
+                    student_code, assessment_type, total_score, level
+                ) VALUES (%s, %s, %s, %s)
+                RETURNING id
+            """, (student_code, assessment_type, total_score, level))
+            assessment_id = cur.fetchone()[0]
 
-        conn.execute("""
-            INSERT INTO assessment_responses (
-                assessment_id,
-                q1,q2,q3,q4,q5,q6,q7,q8,q9,q10,q11,
-                q12,q13,q14,q15,q16,q17,q18,q19,q20,q21,q22
-            ) VALUES (
-                ?,?,?,?,?,?,?,?,?,?,?,?,
-                ?,?,?,?,?,?,?,?,?,?,?
-            )
-        """, (assessment_id, *values))
+            cur.execute("""
+                INSERT INTO assessment_responses (
+                    assessment_id,
+                    q1,q2,q3,q4,q5,q6,q7,q8,q9,q10,q11,
+                    q12,q13,q14,q15,q16,q17,q18,q19,q20,q21,q22
+                ) VALUES (
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+                )
+            """, (assessment_id, *values))
+
         conn.commit()
         return assessment_id
     except Exception:
@@ -360,13 +466,15 @@ def save_assessment_with_responses(
 def get_assessment_responses(assessment_id):
     conn = get_connection()
     try:
-        row = conn.execute("""
-            SELECT
-                q1,q2,q3,q4,q5,q6,q7,q8,q9,q10,q11,
-                q12,q13,q14,q15,q16,q17,q18,q19,q20,q21,q22
-            FROM assessment_responses
-            WHERE assessment_id = ?
-        """, (assessment_id,)).fetchone()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    q1,q2,q3,q4,q5,q6,q7,q8,q9,q10,q11,
+                    q12,q13,q14,q15,q16,q17,q18,q19,q20,q21,q22
+                FROM assessment_responses
+                WHERE assessment_id = %s
+            """, (assessment_id,))
+            row = cur.fetchone()
     finally:
         conn.close()
 
@@ -383,15 +491,17 @@ def get_assessment_responses(assessment_id):
 def save_intervention(student_code, profile, intervention_name, intervention_description):
     conn = get_connection()
     try:
-        conn.execute("""
-            INSERT INTO interventions (
-                student_code, profile, intervention_name,
-                intervention_description
-            ) VALUES (?, ?, ?, ?)
-        """, (
-            student_code, profile, intervention_name, intervention_description
-        ))
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO interventions (
+                    student_code, profile, intervention_name,
+                    intervention_description
+                ) VALUES (%s, %s, %s, %s)
+            """, (student_code, profile, intervention_name, intervention_description))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -411,31 +521,35 @@ def save_study_intervention(
 ):
     conn = get_connection()
     try:
-        conn.execute("""
-            INSERT INTO study_interventions (
-                student_code, day_number, intervention_order,
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO study_interventions (
+                    student_code, day_number, intervention_order,
+                    profile, profile_score, profile_level,
+                    overall_level, estimated_level,
+                    intervention_name, intervention_description, intensity
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (student_code, day_number, intervention_order)
+                DO UPDATE SET
+                    profile = EXCLUDED.profile,
+                    profile_score = EXCLUDED.profile_score,
+                    profile_level = EXCLUDED.profile_level,
+                    overall_level = EXCLUDED.overall_level,
+                    estimated_level = EXCLUDED.estimated_level,
+                    intervention_name = EXCLUDED.intervention_name,
+                    intervention_description = EXCLUDED.intervention_description,
+                    intensity = EXCLUDED.intensity,
+                    shown_at = CURRENT_TIMESTAMP
+            """, (
+                student_code, int(day_number), int(intervention_order),
                 profile, profile_score, profile_level,
                 overall_level, estimated_level,
-                intervention_name, intervention_description, intensity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(student_code, day_number, intervention_order)
-            DO UPDATE SET
-                profile = excluded.profile,
-                profile_score = excluded.profile_score,
-                profile_level = excluded.profile_level,
-                overall_level = excluded.overall_level,
-                estimated_level = excluded.estimated_level,
-                intervention_name = excluded.intervention_name,
-                intervention_description = excluded.intervention_description,
-                intensity = excluded.intensity,
-                shown_at = CURRENT_TIMESTAMP
-        """, (
-            student_code, int(day_number), int(intervention_order),
-            profile, profile_score, profile_level,
-            overall_level, estimated_level,
-            intervention_name, intervention_description, intensity,
-        ))
+                intervention_name, intervention_description, intensity,
+            ))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -443,23 +557,25 @@ def save_study_intervention(
 def get_study_interventions(student_code, day_number=None):
     conn = get_connection()
     try:
-        query = """
-            SELECT
-                id, student_code, day_number, intervention_order,
-                profile, profile_score, profile_level,
-                overall_level, estimated_level,
-                intervention_name, intervention_description,
-                intensity, shown_at
-            FROM study_interventions
-            WHERE student_code = ?
-        """
-        params = [student_code]
-        if day_number is None:
-            query += " ORDER BY day_number, intervention_order"
-        else:
-            query += " AND day_number = ? ORDER BY intervention_order"
-            params.append(int(day_number))
-        return conn.execute(query, params).fetchall()
+        with conn.cursor() as cur:
+            query = """
+                SELECT
+                    id, student_code, day_number, intervention_order,
+                    profile, profile_score, profile_level,
+                    overall_level, estimated_level,
+                    intervention_name, intervention_description,
+                    intensity, shown_at
+                FROM study_interventions
+                WHERE student_code = %s
+            """
+            params = [student_code]
+            if day_number is None:
+                query += " ORDER BY day_number, intervention_order"
+            else:
+                query += " AND day_number = %s ORDER BY intervention_order"
+                params.append(int(day_number))
+            cur.execute(query, params)
+            return cur.fetchall()
     finally:
         conn.close()
 
@@ -489,22 +605,26 @@ def register_study_participant(
 
     conn = get_connection()
     try:
-        conn.execute("""
-            INSERT INTO study_participants (
-                student_code, group_type, start_date,
-                end_date, status, consent
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(student_code) DO UPDATE SET
-                group_type = excluded.group_type,
-                start_date = excluded.start_date,
-                end_date = excluded.end_date,
-                status = excluded.status,
-                consent = excluded.consent
-        """, (
-            student_code, group_type, start_date, end_date,
-            status, int(bool(consent)),
-        ))
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO study_participants (
+                    student_code, group_type, start_date,
+                    end_date, status, consent
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (student_code) DO UPDATE SET
+                    group_type = EXCLUDED.group_type,
+                    start_date = EXCLUDED.start_date,
+                    end_date = EXCLUDED.end_date,
+                    status = EXCLUDED.status,
+                    consent = EXCLUDED.consent
+            """, (
+                student_code, group_type, start_date, end_date,
+                status, int(bool(consent)),
+            ))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -512,12 +632,14 @@ def register_study_participant(
 def get_study_participant(student_code):
     conn = get_connection()
     try:
-        row = conn.execute("""
-            SELECT id, student_code, group_type, start_date,
-                   end_date, status, consent, created_at
-            FROM study_participants
-            WHERE student_code = ?
-        """, (student_code,)).fetchone()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, student_code, group_type, start_date,
+                       end_date, status, consent, created_at
+                FROM study_participants
+                WHERE student_code = %s
+            """, (student_code,))
+            row = cur.fetchone()
     finally:
         conn.close()
 
@@ -567,12 +689,16 @@ def get_study_date(student_code, day_number):
 def complete_study_participant(student_code):
     conn = get_connection()
     try:
-        conn.execute("""
-            UPDATE study_participants
-            SET status = 'completed', end_date = DATE('now')
-            WHERE student_code = ?
-        """, (student_code,))
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE study_participants
+                SET status = 'completed', end_date = CURRENT_DATE::text
+                WHERE student_code = %s
+            """, (student_code,))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -599,32 +725,35 @@ def save_daily_log(
 
     conn = get_connection()
     try:
-        conn.execute("""
-            INSERT INTO daily_logs (
-                student_code, day_number, action_status,
-                actual_minutes, coach_used, notes,
-                checkin_question, checkin_answer
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(student_code, day_number)
-            DO UPDATE SET
-                action_status = excluded.action_status,
-                actual_minutes = excluded.actual_minutes,
-                coach_used = excluded.coach_used,
-                notes = excluded.notes,
-                checkin_question = excluded.checkin_question,
-                checkin_answer = excluded.checkin_answer,
-                created_at = CURRENT_TIMESTAMP
-        """, (
-            student_code,
-            int(day_number),
-            action_status,
-            actual_minutes,
-            int(bool(coach_used)),
-            notes,
-            checkin_question,
-            checkin_answer,
-        ))
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO daily_logs (
+                    student_code, day_number, action_status,
+                    actual_minutes, coach_used, notes,
+                    checkin_question, checkin_answer
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (student_code, day_number) DO UPDATE SET
+                    action_status = EXCLUDED.action_status,
+                    actual_minutes = EXCLUDED.actual_minutes,
+                    coach_used = EXCLUDED.coach_used,
+                    notes = EXCLUDED.notes,
+                    checkin_question = EXCLUDED.checkin_question,
+                    checkin_answer = EXCLUDED.checkin_answer,
+                    created_at = CURRENT_TIMESTAMP
+            """, (
+                student_code,
+                int(day_number),
+                action_status,
+                actual_minutes,
+                int(bool(coach_used)),
+                notes,
+                checkin_question,
+                checkin_answer,
+            ))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -632,14 +761,16 @@ def save_daily_log(
 def get_daily_log(student_code, day_number):
     conn = get_connection()
     try:
-        return conn.execute("""
-            SELECT
-                id, student_code, day_number, action_status,
-                actual_minutes, coach_used, notes, created_at,
-                checkin_question, checkin_answer
-            FROM daily_logs
-            WHERE student_code = ? AND day_number = ?
-        """, (student_code, int(day_number))).fetchone()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    id, student_code, day_number, action_status,
+                    actual_minutes, coach_used, notes, created_at,
+                    checkin_question, checkin_answer
+                FROM daily_logs
+                WHERE student_code = %s AND day_number = %s
+            """, (student_code, int(day_number)))
+            return cur.fetchone()
     finally:
         conn.close()
 
@@ -651,15 +782,16 @@ def get_daily_log(student_code, day_number):
 def save_coach_log(student_code, day_number, student_message, coach_response):
     conn = get_connection()
     try:
-        conn.execute("""
-            INSERT INTO coach_logs (
-                student_code, day_number,
-                student_message, coach_response
-            ) VALUES (?, ?, ?, ?)
-        """, (
-            student_code, int(day_number),
-            student_message, coach_response,
-        ))
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO coach_logs (
+                    student_code, day_number,
+                    student_message, coach_response
+                ) VALUES (%s, %s, %s, %s)
+            """, (student_code, int(day_number), student_message, coach_response))
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
