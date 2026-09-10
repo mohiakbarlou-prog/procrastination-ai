@@ -1,5 +1,5 @@
-# profile.py
 from typing import Dict, Any, Tuple, List
+
 from config import (
     PROFILES,
     PROFILE_THRESHOLD,
@@ -13,44 +13,85 @@ def reverse_score(value):
     """معکوس‌سازی گویه‌های 5 گزینه‌ای."""
     if value is None:
         return None
-    return 6 - float(value)
+
+    try:
+        return 6 - float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_item_value(row: Dict[str, Any], item: str):
-    if item.endswith("R"):
-        base = item[:-1]
+    """
+    دریافت مقدار گویه با پشتیبانی از حروف بزرگ/کوچک.
+
+    مثال:
+        Q3  -> q3
+        Q20R -> q20 سپس reverse score
+    """
+
+    if not isinstance(row, dict):
+        return None
+
+    item = str(item).strip()
+
+    # گویه معکوس
+    if item.upper().endswith("R"):
+        base = item[:-1].strip().lower()
         value = row.get(base)
+
+        # در صورت وجود کلید با حروف بزرگ
+        if value is None:
+            value = row.get(base.upper())
+
         return reverse_score(value) if value is not None else None
-    return row.get(item)
+
+    # گویه عادی
+    key = item.lower()
+    value = row.get(key)
+
+    # سازگاری با داده‌هایی که کلید بزرگ دارند
+    if value is None:
+        value = row.get(item.upper())
+
+    return value
 
 
 def calculate_profile_scores(row: Dict[str, Any]) -> Dict[str, float]:
     """محاسبه امتیاز 10 پروفایل عملیاتی."""
+
     scores = {}
 
     for profile_key, profile in PROFILES.items():
         values = []
+
         for item in profile["items"]:
             value = _get_item_value(row, item)
+
             if value is not None:
                 try:
                     values.append(float(value))
                 except (TypeError, ValueError):
                     pass
 
-        scores[profile_key] = round(sum(values) / len(values), 3) if values else None
+        scores[profile_key] = (
+            round(sum(values) / len(values), 3)
+            if values
+            else None
+        )
 
     return scores
 
 
-def classify_profile_score(score: float, profile_key: str = None) -> str:
+def classify_profile_score(
+    score: float,
+    profile_key: str = None
+) -> str:
     """
     طبقه‌بندی امتیاز یک پروفایل به سه سطح عملیاتی.
 
-    اگر profile_key مشخص باشد، از آستانه داده‌محور همان پروفایل استفاده می‌شود.
-    آستانه‌ها از توزیع 222 مشاهده پژوهش و با برش‌های 33.33 و 66.67 درصدی
-    استخراج شده‌اند.
+    اگر profile_key مشخص باشد، از آستانه همان پروفایل استفاده می‌شود.
     """
+
     if score is None:
         return "unknown"
 
@@ -60,24 +101,35 @@ def classify_profile_score(score: float, profile_key: str = None) -> str:
         return "unknown"
 
     thresholds = PROFILE_THRESHOLDS.get(profile_key)
+
     if thresholds is None:
-        # فقط برای سازگاری با فراخوانی‌های قدیمی که profile_key ندارند.
-        if value < PROFILE_THRESHOLD["low"]:
+        # سازگاری با فراخوانی‌های قدیمی
+        if value <= PROFILE_THRESHOLD["low"]:
             return "low"
-        if value < PROFILE_THRESHOLD["medium"]:
+
+        if value <= PROFILE_THRESHOLD["medium"]:
             return "medium"
+
         return "high"
 
     if value <= thresholds["low_max"]:
         return "low"
+
     if value <= thresholds["medium_max"]:
         return "medium"
+
     return "high"
 
 
-def get_profile_levels(profile_scores: Dict[str, float]) -> Dict[str, str]:
+def get_profile_levels(
+    profile_scores: Dict[str, float]
+) -> Dict[str, str]:
+
     return {
-        key: classify_profile_score(score, profile_key=key)
+        key: classify_profile_score(
+            score,
+            profile_key=key
+        )
         for key, score in profile_scores.items()
     }
 
@@ -88,18 +140,33 @@ def get_dominant_profiles(
 ) -> List[Tuple[str, float]]:
     """
     انتخاب حداکثر دو پروفایل برجسته.
-    پروفایل‌های پایین حذف می‌شوند؛ سپس بر اساس امتیاز نزولی مرتب می‌شوند.
+
+    پروفایل‌های low حذف می‌شوند.
+    سپس بر اساس امتیاز نزولی مرتب می‌شوند.
     """
+
     candidates = [
         (key, score)
         for key, score in profile_scores.items()
-        if score is not None and classify_profile_score(score) != "low"
+        if (
+            score is not None
+            and classify_profile_score(
+                score,
+                profile_key=key
+            ) != "low"
+        )
     ]
 
-    priority_index = {key: i for i, key in enumerate(PROFILE_PRIORITY)}
+    priority_index = {
+        key: i
+        for i, key in enumerate(PROFILE_PRIORITY)
+    }
 
     candidates.sort(
-        key=lambda x: (-x[1], priority_index.get(x[0], 999))
+        key=lambda x: (
+            -x[1],
+            priority_index.get(x[0], 999)
+        )
     )
 
     return candidates[:max_profiles]
@@ -107,20 +174,40 @@ def get_dominant_profiles(
 
 def get_dominant_profile(row: Dict[str, Any]):
     scores = calculate_profile_scores(row)
-    dominant = get_dominant_profiles(scores, max_profiles=1)
-    return (dominant[0][0] if dominant else None), scores
+
+    dominant = get_dominant_profiles(
+        scores,
+        max_profiles=1
+    )
+
+    return (
+        dominant[0][0] if dominant else None,
+        scores
+    )
 
 
-def create_profile(row: Dict[str, Any]) -> Dict[str, Any]:
+def create_profile(
+    row: Dict[str, Any]
+) -> Dict[str, Any]:
+
     scores = calculate_profile_scores(row)
+
     levels = get_profile_levels(scores)
-    dominant = get_dominant_profiles(scores, max_profiles=2)
+
+    dominant = get_dominant_profiles(
+        scores,
+        max_profiles=2
+    )
 
     return {
         "scores": scores,
         "levels": levels,
         "dominant_profiles": dominant,
-        "dominant_profile": dominant[0][0] if dominant else None,
+        "dominant_profile": (
+            dominant[0][0]
+            if dominant
+            else None
+        ),
         "thresholds": PROFILE_THRESHOLDS,
         "threshold_method": PROFILE_THRESHOLD_METHOD,
     }
