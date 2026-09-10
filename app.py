@@ -390,7 +390,6 @@ def _normalize_model_class(value, classes=None):
     except Exception:
         return text
 
-    # Common 3-class encodings: 0/1/2 or 1/2/3.
     numeric_classes = []
     if classes is not None:
         for cls in classes:
@@ -407,7 +406,6 @@ def _normalize_model_class(value, classes=None):
         if ordered == [1, 2, 3]:
             return {1: "low", 2: "medium", 3: "high"}[n]
 
-    # Fallback only when the common zero-based encoding is clearly implied.
     if n in (0, 1, 2):
         return {0: "low", 1: "medium", 2: "high"}[n]
 
@@ -415,18 +413,6 @@ def _normalize_model_class(value, classes=None):
 
 
 def build_model_input(student_data):
-    """
-    Build input for the deployed 7-feature Random Forest pipeline.
-
-    The deployed pipeline was trained with:
-      numeric: Age_Num, ترمتحصیلی
-      categorical: جنسیت, مقطع, استفاده, دانشگاه, رشتهتحصیلی
-
-    Therefore categorical values must be passed in their original textual
-    form; converting them to numeric codes changes the feature representation
-    expected by the fitted preprocessing pipeline and can cause prediction
-    failures.
-    """
     age = student_data.get("age")
     semester = student_data.get("semester")
     gender = str(student_data.get("gender", "")).strip()
@@ -485,7 +471,6 @@ def predict_level(student_data):
                 probabilities[label] = float(prob)
 
         if prediction not in {"low", "medium", "high"}:
-            # اگر مدل خروجی فارسی یا کد غیر استاندارد داد، آن را متوقف نکن
             fallback = _normalize_model_class(raw_prediction, classes=classes)
             if fallback in {"low", "medium", "high"}:
                 prediction = fallback
@@ -506,9 +491,6 @@ def predict_level(student_data):
             "classes": [str(c) for c in classes],
         }
     except Exception as exc:
-        # در صورت خطای واقعی مدل (مثلاً ناسازگاری دسته‌ها با pipeline آموزش‌دیده)
-        # به‌جای تحمیل «متوسط»، مقدار None برگردانده می‌شود تا در ادامه
-        # از سطح پرسشنامه استفاده شود.
         return {
             "level": None,
             "raw_prediction": "",
@@ -528,7 +510,6 @@ def calculate_total_score(answers):
 
 
 def classify_overall_level(score):
-    # Operational cut-points derived from the thesis sample distribution.
     if score <= 51:
         return "low"
     if score <= 66.6741:
@@ -553,7 +534,6 @@ def profile_label(profile):
 
 
 def row_to_intervention(row):
-    """Convert a study_interventions DB row into the minimal intervention object."""
     return {
         "day_number": row[2],
         "profile": row[4],
@@ -571,7 +551,6 @@ def row_to_intervention(row):
 
 
 def render_intervention(intervention, index=1):
-    # نام‌های نمایشی برای رابط دانشجو؛ نام داخلی پروفایل فقط در لایه پژوهش/منطق باقی می‌ماند.
     focus_names = {
         "task_initiation": "شروع به‌موقع فعالیت",
         "educational_content": "مطالعه مرحله‌ای محتوای عقب‌افتاده",
@@ -698,7 +677,6 @@ def questionnaire_form(form_key, title):
     if not submitted:
         return None
 
-    # Convert Persian frequency labels to scores 1..5.
     numeric = {
         f"q{i}": OPTIONS.index(answers[f"q{i}"]) + 1
         for i in range(1, 23)
@@ -707,8 +685,6 @@ def questionnaire_form(form_key, title):
 
 
 def calculate_intervention_result(student, answers):
-    # Keep only the 22 questionnaire items. Database metadata such as
-    # assessment_id must never enter profile calculation or AI context.
     questionnaire_answers = {
         f"q{i}": int(answers[f"q{i}"])
         for i in range(1, 23)
@@ -730,9 +706,6 @@ def calculate_intervention_result(student, answers):
         else overall_level
     )
 
-    # The behavioral profile determines the intervention type. The questionnaire
-    # level remains available for decision-making; the ML estimate can increase
-    # intensity only when it is a validated three-level output.
     level_rank = {"low": 0, "medium": 1, "high": 2}
     ml_rank = level_rank.get(estimated_level, -1)
     decision_level = (
@@ -839,7 +812,6 @@ def save_day1_interventions(student, result):
 
 
 def _daily_stage_templates(profile_key):
-    """Seven progressive execution stages while keeping the behavioral focus stable."""
     return {
         1: {"title": "شروع کوچک", "suffix": "امروز فقط کوچک‌ترین گام اجرایی برنامه را شروع کن.", "actions": ["یک گام بسیار کوچک از برنامه را انتخاب کن.", "زمان شروع را همین حالا مشخص کن."]},
         2: {"title": "تداوم شروع", "suffix": "امروز همان مسیر را در یک بازه کوتاه ادامه بده.", "actions": ["همان فعالیت را در یک بازه کوتاه ادامه بده.", "بعد از پایان بازه، پیشرفت انجام‌شده را ثبت کن."]},
@@ -852,7 +824,6 @@ def _daily_stage_templates(profile_key):
 
 
 def build_daily_intervention(base_intervention, day_number, previous_log=None):
-    """Create a day-specific progression based on day and prior-day execution."""
     item = dict(base_intervention)
     stage = _daily_stage_templates(item.get("profile", "")).get(int(day_number), {})
     base_name = str(item.get("name", "برنامه پیشنهادی")).strip()
@@ -875,7 +846,6 @@ def build_daily_intervention(base_intervention, day_number, previous_log=None):
 
 
 def ensure_daily_interventions(student, study_day, base_result):
-    """Get or create the requested day's intervention snapshot exactly once."""
     student_code = student["student_code"]
     existing = get_study_interventions(student_code, day_number=study_day)
     if existing:
@@ -934,7 +904,6 @@ def render_result_summary(result):
 
 
 def build_today_monitoring(today_log):
-    """Convert the persisted daily log into a safe context for the AI coach."""
     if not today_log:
         return {
             "status": "not_started",
@@ -954,11 +923,6 @@ def build_today_monitoring(today_log):
 
 
 def get_daily_checkin_question(profile, day_number):
-    """Return one concise daily process-monitoring question.
-
-    The wording changes by day and dominant behavioral profile. Responses are
-    process data only and are not added to the 22-item procrastination score.
-    """
     question_bank = {
         "task_initiation": [
             "امروز شروع فعالیت برایت تا چه اندازه دشوار بود؟",
@@ -1219,7 +1183,6 @@ def render_researcher_page():
     assessments = dataframes["آزمون‌ها"]
     daily = dataframes["پایش روزانه"]
 
-    # Concise participant-level summary for the researcher.
     summary = participants[[c for c in ["student_code", "گروه", "تاریخ شروع", "تاریخ پایان", "status"] if c in participants.columns]].copy()
     if not summary.empty:
         summary = summary.rename(columns={"student_code": "کد پژوهشی", "status": "وضعیت"})
@@ -1273,7 +1236,6 @@ def render_researcher_page():
 
 
 if str(st.query_params.get("page", "")).strip().lower() == "researcher":
-    # Researcher authentication state is initialized before this branch.
     if "researcher_authenticated" not in st.session_state:
         st.session_state.researcher_authenticated = False
     if "researcher_role" not in st.session_state:
@@ -1296,6 +1258,7 @@ for key, default in {
     "consent_saved": False,
     "day_ended": None,
     "posttest_saved": False,
+    "pretest_result": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -1319,7 +1282,6 @@ def set_study_consent(student_code, consent=True):
 
 
 def render_consent_page(code, participant):
-    """Show informed consent before the participant enters the study."""
     st.subheader("رضایت آگاهانه برای شرکت در مطالعه")
     st.markdown(
         """
@@ -1385,7 +1347,6 @@ def render_consent_page(code, participant):
 
 
 def render_participant_info_form(code, participant):
-    """Collect and persist the seven demographic/educational model inputs."""
     st.subheader("تکمیل اطلاعات شرکت‌کننده")
     st.caption(
         "این اطلاعات برای اجرای مدل و شخصی‌سازی نحوه ارائه برنامه "
@@ -1468,17 +1429,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# The participant login and the participant-information form must survive
-# Streamlit reruns. A form submission causes a fresh script run, so the
-# selected participant is kept in session_state before showing the form.
 if not st.session_state.student_code:
     if st.session_state.get("day_ended"):
         st.success(f"روز {to_persian_digits(st.session_state['day_ended'])} با موفقیت ذخیره و پایان یافت.")
         st.session_state.day_ended = None
     st.subheader("ورود به مطالعه")
 
-    # If a participant was already validated but has not yet completed
-    # the seven demographic/educational fields, show the form directly.
     pending_code = st.session_state.get("pending_participant_code", "")
     pending_participant = st.session_state.get("pending_participant")
 
@@ -1577,6 +1533,12 @@ st.session_state.student = student
 
 render_student_context(student)
 
+# ── نمایش خلاصه‌ی نتیجه‌ی پیش‌آزمون (فقط یک بار بعد از ثبت) ──
+if st.session_state.get("pretest_result"):
+    st.markdown("### خلاصه‌ی پیش‌آزمون")
+    render_result_summary(st.session_state["pretest_result"])
+    st.session_state["pretest_result"] = None
+
 real_study_day = get_study_day(student_code)
 
 if real_study_day is None:
@@ -1584,7 +1546,6 @@ if real_study_day is None:
     st.stop()
 
 study_day = real_study_day
-
 
 study_date = get_study_date(student_code, study_day)
 study_date_text = jalali_from_gregorian(study_date) if study_date else ""
@@ -1631,6 +1592,7 @@ if not has_assessment(student_code, "pretest"):
                 ensure_daily_interventions(student, 1, result)
 
             st.session_state["pretest_saved"] = True
+            st.session_state["pretest_result"] = result
             st.rerun()
 
         except Exception as exc:
@@ -1801,15 +1763,9 @@ if 1 <= study_day <= 7:
                     st.warning("ابتدا پیام خود را بنویس.")
                 else:
                     try:
-                        # مربی باید آخرین پایش ذخیره‌شده امروز + نتیجه کامل پیش‌آزمون
-                        # + پروفایل رفتاری + اطلاعات آموزشی/جمعیت‌شناختی را ببیند.
                         today_log = get_daily_log(student_code, study_day)
                         today_monitoring = build_today_monitoring(today_log)
 
-                        # اگر فرم پایش امروز در همین صفحه مقدارهای تازه‌ای دارد،
-                        # همان مقدارهای جاری را به مربی بده؛ حتی اگر هنوز دکمه
-                        # «ثبت فعالیت امروز» زده نشده باشد. در غیر این صورت،
-                        # آخرین داده ذخیره‌شده در پایگاه داده استفاده می‌شود.
                         if "status" in locals():
                             today_monitoring["status"] = status
                         if "minutes" in locals() and minutes is not None:
@@ -1887,7 +1843,20 @@ if 1 <= study_day <= 7:
                         )
 
                     except Exception as exc:
-                        st.error(f"مربی هوشمند در دسترس نیست: {exc}")
+                        # پیام محترمانه به‌جای خطای فنی
+                        error_text = str(exc)
+                        lowered = error_text.lower()
+                        if any(k in lowered for k in ["ratelimit", "rate_limit", "429", "quota", "openai", "insufficient_quota"]):
+                            st.warning(
+                                "مربی هوشمند در حال حاضر به دلیل محدودیت موقت سرویس در دسترس نیست. "
+                                "لطفاً چند ساعت دیگر دوباره امتحان کنید. "
+                                "اگر این پیام تکرار شد، به پژوهشگر اطلاع دهید."
+                            )
+                        else:
+                            st.warning(
+                                "ارتباط با مربی هوشمند برقرار نشد. "
+                                "لطفاً دوباره تلاش کنید یا این موضوع را به پژوهشگر اطلاع دهید."
+                            )
 
 
 # ============================================================
@@ -1908,8 +1877,6 @@ if 1 <= study_day < 7 and participant["group_type"] == "intervention":
         type="secondary",
         use_container_width=True,
     ):
-        # Save the latest values again so changes are not lost when the user
-        # exits without pressing the daily form's save button a second time.
         latest_log = get_daily_log(student_code, study_day)
 
         current_status = status if "status" in locals() else (
