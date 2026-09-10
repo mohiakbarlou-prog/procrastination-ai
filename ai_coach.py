@@ -6,11 +6,12 @@ from openai import OpenAI
 import streamlit as st
 
 # ============================================================
-# Provider configuration
+# Provider configuration — OpenAI (direct)
 # ============================================================
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# اتصال مستقیم به API رسمی OpenAI
+# base_url پیش‌فرض خود SDK استفاده می‌شود (نیازی به تعیین نیست)
 
-FALLBACK_MODEL = "google/gemini-2.0-flash-exp:free"
+FALLBACK_MODEL = "gpt-4o-mini"
 
 
 def _resolve_default_model() -> str:
@@ -57,6 +58,8 @@ SYSTEM_INSTRUCTIONS = """
 - پاسخ معمولاً ۳ تا ۶ جمله باشد و در صورت نیاز حداکثر ۳ گام عملی کوتاه داشته باشد.
 - از توصیه‌های کلی و تکراری مثل «برنامه‌ریزی کن و موفق باشی» پرهیز کن.
 - اگر اطلاعاتی وجود ندارد، آن را حدس نزن.
+
+پاسخ خود را مستقیماً و به زبان فارسی بنویس. از هیچ مقدمه یا توضیح اضافه استفاده نکن.
 """.strip()
 
 
@@ -207,18 +210,20 @@ def _build_user_prompt(
 {_clean(student_message)}
 
 اکنون یک پاسخ مربی بده که مستقیماً به پیام دانشجو پاسخ دهد و برنامه امروز را با توجه به اطلاعات بالا، به‌ویژه پایش امروز و نتیجه پرسشنامه، قابل اجرا و شخصی‌سازی کند.
+
+پاسخ خود را به زبان فارسی بنویس. مستقیم شروع کن؛ از جمله‌ای مثل «البته» یا «حتماً» شروع نکن.
 """.strip()
 
 
 def _friendly_error(exc: Exception) -> str:
-    """تبدیل خطاهای سرویس به پیام فارسی قابل‌فهم برای کاربر."""
+    """تبدیل خطاهای OpenAI به پیام فارسی قابل‌فهم برای کاربر."""
     text = f"{type(exc).__name__}: {exc}"
     lowered = text.lower()
 
     if "ratelimit" in lowered or "rate_limit" in lowered or "429" in lowered:
         return (
             "مربی هوشمند در حال حاضر به دلیل محدودیت مصرف سرویس، موقتاً در دسترس نیست. "
-            "لطفاً چند دقیقه دیگر دوباره امتحان کنید. اگر این پیام تکرار شد، "
+            "لطفاً چند ساعت دیگر دوباره امتحان کنید. اگر این پیام تکرار شد، "
             "این موضوع را به پژوهشگر اطلاع دهید."
         )
 
@@ -228,9 +233,9 @@ def _friendly_error(exc: Exception) -> str:
             "لطفاً تنظیمات سامانه را بررسی کنید."
         )
 
-    if "insufficient_quota" in lowered or "insufficient_credits" in lowered or "402" in lowered:
+    if "insufficient_quota" in lowered or "credit_balance_exhausted" in lowered or "402" in lowered:
         return (
-            "سهمیه‌ی سرویس مربی هوشمند به پایان رسیده است. "
+            "اعتبار حساب سرویس مربی هوشمند به پایان رسیده است. "
             "این موضوع را به پژوهشگر اطلاع دهید."
         )
 
@@ -253,6 +258,34 @@ def _friendly_error(exc: Exception) -> str:
     )
 
 
+def _extract_text_from_response(response) -> str:
+    """استخراج متن از پاسخ OpenAI با پشتیبانی از فیلدهای مختلف."""
+    if not response or not getattr(response, "choices", None):
+        return ""
+
+    choice = response.choices[0]
+    message = getattr(choice, "message", None)
+    if message is None:
+        return ""
+
+    content = getattr(message, "content", None)
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(item.get("text", ""))
+            elif isinstance(item, str):
+                parts.append(item)
+        joined = " ".join(p for p in parts if p).strip()
+        if joined:
+            return joined
+
+    return ""
+
+
 def ai_coach(
     level: str,
     dominant_profile: str,
@@ -264,11 +297,12 @@ def ai_coach(
     questionnaire_result: Optional[dict] = None,
     today_monitoring: Optional[dict] = None,
 ) -> str:
-    api_key = _clean(os.getenv("OPENROUTER_API_KEY"))
+    # کلید OpenAI از Environment Variable یا Streamlit Secrets خوانده می‌شود.
+    api_key = _clean(os.getenv("OPENAI_API_KEY"))
 
     if not api_key:
         try:
-            api_key = _clean(st.secrets.get("OPENROUTER_API_KEY", ""))
+            api_key = _clean(st.secrets.get("OPENAI_API_KEY", ""))
         except Exception:
             api_key = ""
 
@@ -276,10 +310,8 @@ def ai_coach(
         return "کلید دسترسی مربی هوشمند تنظیم نشده است. لطفاً تنظیمات سامانه را بررسی کنید."
 
     try:
-        client = OpenAI(
-            api_key=api_key,
-            base_url=OPENROUTER_BASE_URL,
-        )
+        # اتصال مستقیم به OpenAI — نیازی به base_url نیست
+        client = OpenAI(api_key=api_key)
         response = client.chat.completions.create(
             model=model or DEFAULT_MODEL,
             messages=[
@@ -298,16 +330,19 @@ def ai_coach(
                     ),
                 },
             ],
-            max_tokens=350,
+            max_tokens=800,
+            temperature=0.7,
         )
 
-        if not response.choices:
-            return "در حال حاضر پاسخی از مربی هوشمند دریافت نشد."
-
-        text = response.choices[0].message.content or ""
+        text = _extract_text_from_response(response)
         text = _clean(text)
         if text:
             return html.unescape(text)
-        return "در حال حاضر پاسخی از مربی هوشمند دریافت نشد."
+
+        return (
+            "مربی هوشمند این بار پاسخی برنگرداند. "
+            "لطفاً چند لحظه دیگر دوباره تلاش کنید. "
+            "اگر این پیام تکرار شد، به پژوهشگر اطلاع دهید."
+        )
     except Exception as exc:
         return _friendly_error(exc)
