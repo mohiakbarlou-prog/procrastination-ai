@@ -878,31 +878,6 @@ def ensure_daily_interventions(student, study_day, base_result):
     return get_study_interventions(student_code, day_number=int(study_day))
 
 
-def render_result_summary(result):
-    c1, c2, c3 = st.columns(3)
-    total_text = to_persian_digits(f"{result['total_score']:.1f}")
-    c1.metric("نمره کل", f"{total_text} از {to_persian_digits(110)}")
-    c2.metric("سطح پرسشنامه", LEVEL_NAMES.get(result["overall_level"], result["overall_level"]))
-    estimated_display = LEVEL_NAMES.get(
-        result.get("estimated_level"),
-        "نامشخص" if result.get("estimated_level") == "unknown" else str(result.get("estimated_level", "")),
-    )
-    c3.metric("برآورد مدل", estimated_display)
-
-    ml = result.get("ml_result")
-    if ml and ml.get("error"):
-        st.warning(f"برآورد مدل در این اجرا انجام نشد: {ml['error']}")
-    if ml and ml.get("probabilities"):
-        p = ml["probabilities"]
-        st.caption(
-            "احتمال‌های مدل: "
-            + " | ".join(
-                f"{LEVEL_NAMES.get(k, k)}: {to_persian_digits(f'{v:.1%}')}"
-                for k, v in p.items()
-            )
-        )
-
-
 def build_today_monitoring(today_log):
     if not today_log:
         return {
@@ -1258,7 +1233,6 @@ for key, default in {
     "consent_saved": False,
     "day_ended": None,
     "posttest_saved": False,
-    "pretest_result": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -1533,12 +1507,6 @@ st.session_state.student = student
 
 render_student_context(student)
 
-# ── نمایش خلاصه‌ی نتیجه‌ی پیش‌آزمون (فقط یک بار بعد از ثبت) ──
-if st.session_state.get("pretest_result"):
-    st.markdown("### خلاصه‌ی پیش‌آزمون")
-    render_result_summary(st.session_state["pretest_result"])
-    st.session_state["pretest_result"] = None
-
 real_study_day = get_study_day(student_code)
 
 if real_study_day is None:
@@ -1592,7 +1560,6 @@ if not has_assessment(student_code, "pretest"):
                 ensure_daily_interventions(student, 1, result)
 
             st.session_state["pretest_saved"] = True
-            st.session_state["pretest_result"] = result
             st.rerun()
 
         except Exception as exc:
@@ -1843,7 +1810,6 @@ if 1 <= study_day <= 7:
                         )
 
                     except Exception as exc:
-                        # پیام محترمانه به‌جای خطای فنی
                         error_text = str(exc)
                         lowered = error_text.lower()
                         if any(k in lowered for k in ["ratelimit", "rate_limit", "429", "quota", "openai", "insufficient_quota"]):
