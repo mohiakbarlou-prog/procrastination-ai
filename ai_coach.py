@@ -5,7 +5,12 @@ from typing import Optional
 from openai import OpenAI
 import streamlit as st
 
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+# ============================================================
+# Model configuration
+# ============================================================
+# مدل پیش‌فرض gpt-4o-mini است: ارزان، سریع، با سهمیه‌ی generous
+# می‌توانی از طریق متغیر محیطی OPENAI_MODEL مدل را عوض کنی.
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 SYSTEM_INSTRUCTIONS = """
 تو مربی هوشمند سامانه «مدیریت اهمال‌کاری تحصیلی در آموزش الکترونیکی» هستی.
@@ -110,7 +115,8 @@ def _profile_summary(questionnaire_result: Optional[dict]) -> str:
             "general_procrastination": "اهمال‌کاری عمومی",
         }
         shown = []
-        for key, value in ranked[:5]:
+        # فقط ۳ الگوی برتر را می‌فرستیم تا مصرف توکن کم شود.
+        for key, value in ranked[:3]:
             if isinstance(value, dict):
                 score = value.get("score", "")
                 level = value.get("level", "")
@@ -122,22 +128,8 @@ def _profile_summary(questionnaire_result: Optional[dict]) -> str:
         if shown:
             lines.append("الگوهای رفتاری برجسته:\n" + "\n".join(shown))
 
-    answers = questionnaire_result.get("answers")
-    if isinstance(answers, dict):
-        q_answers = {
-            key: value
-            for key, value in answers.items()
-            if isinstance(key, str)
-            and key.lower().startswith("q")
-            and key[1:].isdigit()
-            and 1 <= int(key[1:]) <= 22
-        }
-        answer_text = " | ".join(
-            f"سؤال {int(key[1:])}: {value}"
-            for key, value in sorted(q_answers.items(), key=lambda x: int(x[0][1:]))
-        )
-        if answer_text:
-            lines.append("پاسخ‌های ۲۲ سؤال (امتیاز خام؛ سؤال‌های ۲۰ تا ۲۲ در محاسبه معکوس می‌شوند):\n" + answer_text)
+    # پاسخ‌های خام ۲۲ سؤال ارسال نمی‌شوند تا مصرف توکن کاهش یابد.
+    # الگوهای برتر و نمره‌ی کل، اطلاعات کافی برای مربی فراهم می‌کنند.
 
     return "\n".join(lines)
 
@@ -205,6 +197,55 @@ def _build_user_prompt(
 """.strip()
 
 
+def _friendly_error(exc: Exception) -> str:
+    """تبدیل خطاهای OpenAI به پیام فارسی قابل‌فهم برای کاربر."""
+    text = f"{type(exc).__name__}: {exc}"
+    lowered = text.lower()
+
+    # Rate limit (سهمیه تمام شده)
+    if "ratelimit" in lowered or "rate_limit" in lowered or "429" in lowered:
+        return (
+            "مربی هوشمند در حال حاضر به دلیل محدودیت مصرف سرویس، موقتاً در دسترس نیست. "
+            "لطفاً چند ساعت دیگر دوباره امتحان کنید. اگر این پیام تکرار شد، "
+            "این موضوع را به پژوهشگر اطلاع دهید."
+        )
+
+    # خطای احراز هویت / کلید نامعتبر
+    if "authentication" in lowered or "invalid_api_key" in lowered or "401" in lowered:
+        return (
+            "کلید دسترسی مربی هوشمند معتبر نیست. "
+            "لطفاً تنظیمات سامانه را بررسی کنید."
+        )
+
+    # خطای سهمیه‌ی حساب
+    if "insufficient_quota" in lowered or "quota" in lowered or "402" in lowered:
+        return (
+            "سهمیه‌ی سرویس مربی هوشمند به پایان رسیده است. "
+            "این موضوع را به پژوهشگر اطلاع دهید."
+        )
+
+    # خطای شبکه / اتصال
+    if "connection" in lowered or "timeout" in lowered or "network" in lowered:
+        return (
+            "ارتباط با مربی هوشمند برقرار نشد. "
+            "لطفاً اتصال اینترنت خود را بررسی کنید و دوباره تلاش کنید."
+        )
+
+    # خطای مدل نامعتبر
+    if "model" in lowered and ("not found" in lowered or "does not exist" in lowered or "invalid" in lowered):
+        return (
+            "مدل مربی هوشمند در دسترس نیست. "
+            "این موضوع را به پژوهشگر اطلاع دهید."
+        )
+
+    # سایر خطاها — پیام عمومی با جزئیات فنی کوتاه
+    short = text[:200]
+    return (
+        "مربی هوشمند در حال حاضر در دسترس نیست. "
+        f"لطفاً بعداً دوباره امتحان کنید. (کد خطا: {short})"
+    )
+
+
 def ai_coach(
     level: str,
     dominant_profile: str,
@@ -243,11 +284,11 @@ def ai_coach(
                 questionnaire_result=questionnaire_result,
                 today_monitoring=today_monitoring,
             ),
-            max_output_tokens=450,
+            max_output_tokens=350,
         )
         text = getattr(response, "output_text", None)
         if text:
             return html.unescape(_clean(text))
         return "در حال حاضر پاسخی از مربی هوشمند دریافت نشد."
     except Exception as exc:
-        return f"ارتباط با مربی هوشمند برقرار نشد: {type(exc).__name__} — {exc}"
+        return _friendly_error(exc)
