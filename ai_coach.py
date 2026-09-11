@@ -272,5 +272,5 @@ def ai_coach(
         if text:
             return html.unescape(text)
         return "مربی هوشمند این بار پاسخی برنگرداند. لطفاً دوباره تلاش کنید."
-      except Exception as exc:
-        return _debug_error(exc)
+    except Exception as exc:
+          return _debug_error(exc)
