@@ -10,7 +10,7 @@ import streamlit as st
 # ============================================================
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 
-FALLBACK_MODEL = "llama-3.3-70b-versatile"
+FALLBACK_MODEL = "openai/gpt-oss-120b"
 
 
 def _resolve_default_model() -> str:
@@ -185,9 +185,6 @@ def _build_user_prompt(level, dominant_profile, intervention_name,
 پاسخ به فارسی، مستقیم و بدون مقدمه‌چینی.
 """.strip()
 
-def _debug_error(exc):
-    """نمایش خطای واقعی برای دیباگ — موقت"""
-    return f"[DEBUG] {type(exc).__name__}: {str(exc)[:500]}"
 
 def _friendly_error(exc):
     text = f"{type(exc).__name__}: {exc}"
@@ -273,4 +270,4 @@ def ai_coach(
             return html.unescape(text)
         return "مربی هوشمند این بار پاسخی برنگرداند. لطفاً دوباره تلاش کنید."
     except Exception as exc:
-          return _debug_error(exc)
+        return _friendly_error(exc)
