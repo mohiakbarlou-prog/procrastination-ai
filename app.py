@@ -310,6 +310,13 @@ LEVEL_NAMES = {
     "متوسط": "متوسط",
     "بالا": "بالا",
 }
+try:
+    _has_groq = bool(st.secrets.get("GROQ_API_KEY", ""))
+    _has_db = bool(st.secrets.get("DATABASE_URL", ""))
+    st.sidebar.write(f"GROQ_API_KEY: {'✓' if _has_groq else '✗'}")
+    st.sidebar.write(f"DATABASE_URL: {'✓' if _has_db else '✗'}")
+except Exception as e:
+    st.sidebar.error(f"Secrets error: {e}")
 
 PROFILE_NAMES = {
     "task_initiation": "تأخیر در شروع کار",
