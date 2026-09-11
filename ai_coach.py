@@ -185,6 +185,9 @@ def _build_user_prompt(level, dominant_profile, intervention_name,
 پاسخ به فارسی، مستقیم و بدون مقدمه‌چینی.
 """.strip()
 
+def _debug_error(exc):
+    """نمایش خطای واقعی برای دیباگ — موقت"""
+    return f"[DEBUG] {type(exc).__name__}: {str(exc)[:500]}"
 
 def _friendly_error(exc):
     text = f"{type(exc).__name__}: {exc}"
@@ -269,5 +272,5 @@ def ai_coach(
         if text:
             return html.unescape(text)
         return "مربی هوشمند این بار پاسخی برنگرداند. لطفاً دوباره تلاش کنید."
-    except Exception as exc:
-        return _friendly_error(exc)
+      except Exception as exc:
+        return _debug_error(exc)
